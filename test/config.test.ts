@@ -1,0 +1,135 @@
+import { describe, expect, it } from 'vitest';
+
+import {
+  assertShellCommandAllowed,
+  DEFAULT_PUSH_ALLOWED_ROOTS,
+  DEFAULT_SHELL_BLOCKED_PATTERNS,
+  GuardrailError,
+  isRemotePathAllowed,
+  loadConfig,
+} from '../src/config.js';
+
+describe('loadConfig', () => {
+  it('defaults the adb binary to "adb" from PATH', () => {
+    expect(loadConfig({}).adbPath).toBe('adb');
+  });
+
+  it('honours ADB_PATH and ADBMCP_ALLOWED_DEVICES', () => {
+    const config = loadConfig({
+      ADB_PATH: '/opt/platform-tools/adb',
+      ADBMCP_ALLOWED_DEVICES: 'emulator-5554, R58M12345AB',
+    });
+    expect(config.adbPath).toBe('/opt/platform-tools/adb');
+    expect(config.allowedDevices).toEqual(['emulator-5554', 'R58M12345AB']);
+  });
+
+  it('treats an empty allowlist as "all devices"', () => {
+    expect(loadConfig({ ADBMCP_ALLOWED_DEVICES: '   ' }).allowedDevices).toBeNull();
+  });
+
+  it('installs the default blocked shell patterns and allows overriding them', () => {
+    expect(loadConfig({}).shell.blockedPatterns).toEqual([...DEFAULT_SHELL_BLOCKED_PATTERNS]);
+    expect(loadConfig({ ADBMCP_SHELL_BLOCKED_PATTERNS: 'reboot' }).shell.blockedPatterns).toEqual(['reboot']);
+    expect(loadConfig({ ADBMCP_SHELL_ALLOWED_PREFIXES: 'pm , dumpsys ' }).shell.allowedPrefixes).toEqual([
+      'pm',
+      'dumpsys',
+    ]);
+  });
+
+  it('rejects invalid numeric limits instead of silently ignoring them', () => {
+    expect(() => loadConfig({ ADBMCP_TIMEOUT_MS: 'soon' })).toThrow(/ADBMCP_TIMEOUT_MS/);
+    expect(() => loadConfig({ ADBMCP_MAX_OUTPUT_BYTES: '-1' })).toThrow(/ADBMCP_MAX_OUTPUT_BYTES/);
+  });
+
+  it('uses the documented default push roots', () => {
+    expect(loadConfig({}).pushAllowedRoots).toEqual([...DEFAULT_PUSH_ALLOWED_ROOTS]);
+  });
+});
+
+describe('assertShellCommandAllowed', () => {
+  const policy = loadConfig({}).shell;
+
+  it('blocks reboot in all its shell positions', () => {
+    expect(() => assertShellCommandAllowed('reboot', policy)).toThrow(GuardrailError);
+    expect(() => assertShellCommandAllowed('reboot -p', policy)).toThrow(/blocked/i);
+    expect(() => assertShellCommandAllowed('ls /sdcard && reboot', policy)).toThrow(GuardrailError);
+    expect(() => assertShellCommandAllowed('echo hi; reboot now', policy)).toThrow(GuardrailError);
+  });
+
+  it('blocks privilege escalation with su', () => {
+    expect(() => assertShellCommandAllowed('su', policy)).toThrow(GuardrailError);
+    expect(() => assertShellCommandAllowed('su -c id', policy)).toThrow(GuardrailError);
+    expect(() => assertShellCommandAllowed('cd /data && su 0 sh', policy)).toThrow(GuardrailError);
+  });
+
+  it('blocks filesystem-destroying commands', () => {
+    expect(() => assertShellCommandAllowed('rm -rf /', policy)).toThrow(GuardrailError);
+    expect(() => assertShellCommandAllowed('rm -fr   /', policy)).toThrow(GuardrailError);
+    expect(() => assertShellCommandAllowed('mkfs.ext4 /dev/block/sda1', policy)).toThrow(GuardrailError);
+    expect(() => assertShellCommandAllowed('wipe data', policy)).toThrow(GuardrailError);
+  });
+
+  it('still allows everyday read commands', () => {
+    for (const command of [
+      'pm list packages',
+      'dumpsys battery',
+      'ls -la /sdcard/Download',
+      'rm -rf /sdcard/tmp/app-cache',
+      'cat /proc/meminfo',
+      'getprop ro.build.version.sdk',
+      'logcat -d -t 100',
+      'settings get global airplane_mode_on',
+      'ip addr show wlan0',
+    ]) {
+      expect(() => assertShellCommandAllowed(command, policy)).not.toThrow();
+    }
+  });
+
+  it('rejects an empty command', () => {
+    expect(() => assertShellCommandAllowed('   ', policy)).toThrow(/empty/i);
+  });
+
+  it('enforces allowedPrefixes when a team hardens shell', () => {
+    const hardened = { blockedPatterns: [...DEFAULT_SHELL_BLOCKED_PATTERNS], allowedPrefixes: ['pm list'] };
+    expect(() => assertShellCommandAllowed('pm list packages', hardened)).not.toThrow();
+    expect(() => assertShellCommandAllowed('dumpsys battery', hardened)).toThrow(/ALLOWED_PREFIXES/);
+  });
+
+  it('reports a broken configured regex instead of crashing the server', () => {
+    const broken = { blockedPatterns: ['(['], allowedPrefixes: null };
+    expect(() => assertShellCommandAllowed('ls', broken)).toThrow(/invalid regular expression/i);
+  });
+
+  it('explains how a maintainer can relax a block', () => {
+    const error = (() => {
+      try {
+        assertShellCommandAllowed('reboot', policy);
+        return null;
+      } catch (cause) {
+        return cause as GuardrailError;
+      }
+    })();
+    expect(error?.rule).toBe('shell.blocked');
+    expect(error?.message).toContain('ADBMCP_SHELL_BLOCKED_PATTERNS');
+  });
+});
+
+describe('isRemotePathAllowed', () => {
+  const roots = [...DEFAULT_PUSH_ALLOWED_ROOTS];
+
+  it('allows paths inside the default roots', () => {
+    expect(isRemotePathAllowed('/sdcard/Download/app.apk', roots)).toBe(true);
+    expect(isRemotePathAllowed('/sdcard', roots)).toBe(true);
+    expect(isRemotePathAllowed('/storage/emulated/0/Pictures/shot.png', roots)).toBe(true);
+    expect(isRemotePathAllowed('/data/local/tmp/payload', roots)).toBe(true);
+  });
+
+  it('refuses paths outside the roots, partial-prefix tricks and traversal', () => {
+    expect(isRemotePathAllowed('/system/bin/sh', roots)).toBe(false);
+    expect(isRemotePathAllowed('/sdcard-evil/x', roots)).toBe(false);
+    expect(isRemotePathAllowed('/data/data/com.example/db.sqlite', roots)).toBe(false);
+    expect(isRemotePathAllowed('/sdcard/../system/x', roots)).toBe(false);
+    expect(isRemotePathAllowed('relative/path', roots)).toBe(false);
+    expect(isRemotePathAllowed('/sdcard/', roots)).toBe(true);
+  });
+});

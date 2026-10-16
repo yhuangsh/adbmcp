@@ -73,16 +73,21 @@ Naming: snake_case, verb-first, `adb_` prefix avoided except where it aids clari
 
 Also in MVP: **Prompts** — a small set of prompt templates (`debug_crash`, `install_and_launch`, `capture_bug_report`) that orchestrate the tools above. **Resources** — `adb://devices` (live device list) so clients can subscribe to device state.
 
-### 4.2 Later (v2)
+### 4.2 Later (v2) — REVISED after oracle pressure-test
 
-- `wireless_pair` / `wireless_connect` (`adb pair`, `adb connect`, `adb tcpip`) — needs interactive code entry; candidate for MCP **elicitation** to prompt the user for the pairing code [2].
-- `screenrecord_start/stop` — long-running video capture with handle-based control (v2 because of file management/host-transfer complexity).
-- `reverse_port` / `remove_reverse`, `list_forwards`.
-- `bugreport` (large artifact handling), `dumpsys_query` (curated: battery, activity, window, connectivity).
-- `grant_permission` / `revoke_permission` (`pm grant/revoke`) — `destructiveHint: true`.
-- `clear_app_data` (`pm clear`) — **destructive**, allowlist-gated.
-- Emulator management (`emu avd` commands, `adb emu` controls) — possibly a separate server.
-- Input injection as first-class tools (`tap`, `swipe`, `type_text`) for agentic UI testing, if not left to `shell`.
+**v0.1.1 first (hygiene, outranks all features):** npm publish, GitHub remote, CI matrix (ubuntu/macOS/windows — Windows is currently *unmeasured*, not best-effort), README polish.
+
+**v2.0 cut list, in order:**
+1. `reverse_port` / `remove_reverse` / `list_forwards` — mirror-symmetry with forwards; existing PORT_SPEC validation
+2. `grant_permission` / `revoke_permission` (`destructiveHint: true`) / `clear_app_data` (allowlist-gated)
+3. `connect` / `disconnect` — TCP/IP wireless without pairing; most "wireless debugging" asks are just this
+4. `tap` / `swipe` / `type_text` / `key_event` — minimal first-class input injection (typed schemas fix the `input text` quoting footgun; no DSL per §7)
+5. `dumpsys_query` — curated: battery, activity, window, connectivity
+6. `wireless_pair` — pairing `code` as a **required argument** (the chat is the elicitation channel); MCP elicitation only as later progressive enhancement
+
+**Explicitly out of v2.0:** Streamable HTTP transport (speculative multi-tenant infra; additive later), `screenrecord` (needs a job lifecycle, not the stream registry), `bugreport` (10–50 MB artifact agents can't consume), emulator management (different binary/lifecycle/trust surface — separate server when farm demand is real), resource subscriptions/notifications.
+
+**Governing risk:** the roadmap must be re-ranked by validated demand after publishing, not adb-surface completeness.
 
 ## 5. High-Level Architecture
 

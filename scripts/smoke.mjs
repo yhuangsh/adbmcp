@@ -2,14 +2,17 @@
 /**
  * Live smoke test for adbmcp against a real device.
  * Drives the built server (dist/index.js) over stdio with the official MCP SDK client.
- * State-restoring: install→uninstall round-trip, pushed files cleaned up, forwards removed.
+ * State-restoring: install→uninstall round-trip, pushed files cleaned up, forwards/reverses removed.
+ *
+ * Expects ADBMCP_CLEAR_ALLOWED_PACKAGES to not list the throwaway package used for the
+ * clear_app_data refusal check (any normal allowlist satisfies this).
  *
  * Usage: node scripts/smoke.mjs [serial]   (serial optional when exactly one device is attached)
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 const ART = '/tmp/adbmcp-smoke';
@@ -32,7 +35,7 @@ console.log('connected to adbmcp over stdio\n');
 
 // --- 1. tool/prompt/resource discovery -------------------------------------
 const tools = await client.listTools();
-check('tools/list returns 19 tools', tools.tools.length === 19, `got ${tools.tools.length}`);
+check('tools/list returns 28 tools', tools.tools.length === 28, `got ${tools.tools.length}`);
 const prompts = await client.listPrompts();
 check('prompts/list returns 3 prompts', prompts.prompts.length === 3, `got ${prompts.prompts.length}`);
 const res = await client.readResource({ uri: 'adb://devices' });
@@ -69,6 +72,7 @@ check('pushed content readable on device', !isErr(cat) && text(cat).includes('ad
 const trav = await client.callTool({ name: 'push_file', arguments: { local_path: localHello, remote_path: '/sdcard/../data/system/x', device: serial } });
 check('push_file traversal refused', isErr(trav), text(trav).slice(0, 120).replace(/\n/g, ' '));
 const pulled = join(ART, 'pulled-hello.txt');
+rmSync(pulled, { force: true }); // smoke must be rerunnable: drop stale artifact from a previous run
 const pull = await client.callTool({ name: 'pull_file', arguments: { remote_path: remotePath, local_path: pulled, device: serial } });
 check('pull_file round-trips content', !isErr(pull) && readFileSync(pulled, 'utf8').includes('adbmcp smoke'));
 const pullAgain = await client.callTool({ name: 'pull_file', arguments: { remote_path: remotePath, local_path: pulled, device: serial } });
@@ -124,17 +128,48 @@ if (img?.data) {
 const ui = await client.callTool({ name: 'get_ui_hierarchy', arguments: { device: serial } });
 check('get_ui_hierarchy returns XML', !isErr(ui) && text(ui).includes('<?xml'), text(ui).slice(0, 90).replace(/\n/g, ' '));
 
-// --- 8. port forward lifecycle ----------------------------------------------
+// --- 8. port forward + reverse lifecycle ------------------------------------
 const fwd = await client.callTool({ name: 'forward_port', arguments: { local: 'tcp:18899', remote: 'tcp:18899', device: serial } });
 check('forward_port ok', !isErr(fwd), text(fwd).slice(0, 80).replace(/\n/g, ' '));
 const fwdList = execFileSync('adb', ['forward', '--list'], { encoding: 'utf8' });
 check('forward visible to host adb', fwdList.includes('18899'), fwdList.trim());
+let fwdEntries = [];
+try { fwdEntries = JSON.parse(text(await client.callTool({ name: 'list_forwards', arguments: { device: serial } }))); } catch {}
+check(
+  'list_forwards returns structured JSON with the active forward',
+  Array.isArray(fwdEntries) && fwdEntries.some((e) => e.local === 'tcp:18899' && e.remote === 'tcp:18899'),
+  JSON.stringify(fwdEntries).slice(0, 140),
+);
 const unfwd = await client.callTool({ name: 'remove_forward', arguments: { local: 'tcp:18899', device: serial } });
 check('remove_forward ok', !isErr(unfwd));
 const fwdGone = execFileSync('adb', ['forward', '--list'], { encoding: 'utf8' });
 check('forward removed on host', !fwdGone.includes('18899'), fwdGone.trim() || '(empty)');
 
-// --- 9. cleanup + shutdown hygiene ------------------------------------------
+const rev = await client.callTool({ name: 'reverse_port', arguments: { remote: 'tcp:18900', local: 'tcp:18900', device: serial } });
+check('reverse_port ok', !isErr(rev), text(rev).slice(0, 80).replace(/\n/g, ' '));
+const revHost = execFileSync('adb', ['reverse', '--list'], { encoding: 'utf8' });
+check('reverse visible to host adb', revHost.includes('18900'), revHost.trim());
+let revEntries = [];
+try { revEntries = JSON.parse(text(await client.callTool({ name: 'list_reverses', arguments: { device: serial } }))); } catch {}
+check(
+  'list_reverses returns structured JSON with the active reverse',
+  Array.isArray(revEntries) && revEntries.some((e) => e.remote === 'tcp:18900' && e.local === 'tcp:18900'),
+  JSON.stringify(revEntries).slice(0, 140),
+);
+const unrev = await client.callTool({ name: 'remove_reverse', arguments: { remote: 'tcp:18900', device: serial } });
+check('remove_reverse ok', !isErr(unrev), text(unrev).slice(0, 80).replace(/\n/g, ' '));
+const revGone = execFileSync('adb', ['reverse', '--list'], { encoding: 'utf8' });
+check('reverse removed on host', !revGone.includes('18900'), revGone.trim() || '(empty)');
+
+// --- 9. pm guardrail (refusal only; never clears real data) -----------------
+const clearRefused = await client.callTool({ name: 'clear_app_data', arguments: { package: 'com.adbmcp.smoke.unlisted', device: serial } });
+check(
+  'clear_app_data refuses a package not in ADBMCP_CLEAR_ALLOWED_PACKAGES',
+  isErr(clearRefused) && text(clearRefused).includes('ADBMCP_CLEAR_ALLOWED_PACKAGES'),
+  text(clearRefused).slice(0, 160).replace(/\n/g, ' '),
+);
+
+// --- 10. cleanup + shutdown hygiene -----------------------------------------
 await client.callTool({ name: 'shell', arguments: { command: 'rm -r /data/local/tmp/adbmcp-smoke', device: serial } });
 check('device cleanup (rm pushed dir)', true);
 await client.close(); // SIGTERMs the server → SIGTERM handler → registry.closeAll()

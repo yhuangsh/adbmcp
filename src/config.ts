@@ -43,6 +43,11 @@ export interface AdbmcpConfig {
   shell: ShellPolicy;
   /** Remote roots push_file may write to (ADBMCP_PUSH_ALLOWED_ROOTS). */
   pushAllowedRoots: string[];
+  /**
+   * Packages clear_app_data may wipe (ADBMCP_CLEAR_ALLOWED_PACKAGES).
+   * Empty means "refuse every clear": the allowlist has no allow-all mode.
+   */
+  clearAllowedPackages: string[];
   limits: {
     defaultTimeoutMs: number;
     maxOutputBytes: number;
@@ -91,6 +96,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AdbmcpConfig {
       allowedPrefixes: parseList(env['ADBMCP_SHELL_ALLOWED_PREFIXES']),
     },
     pushAllowedRoots: parseList(env['ADBMCP_PUSH_ALLOWED_ROOTS']) ?? [...DEFAULT_PUSH_ALLOWED_ROOTS],
+    clearAllowedPackages: parseList(env['ADBMCP_CLEAR_ALLOWED_PACKAGES']) ?? [],
     limits: {
       defaultTimeoutMs: parsePositiveInt(
         env['ADBMCP_TIMEOUT_MS'],
@@ -160,6 +166,20 @@ export function assertShellCommandAllowed(command: string, policy: ShellPolicy):
       );
     }
   }
+}
+
+/**
+ * Enforce the `clear_app_data` package allowlist. Unlike the device and push
+ * allowlists there is no allow-all default: an unset variable refuses every
+ * clear, because the operation is irreversible for the user's data.
+ */
+export function assertClearPackageAllowed(packageName: string, allowedPackages: string[]): void {
+  if (allowedPackages.includes(packageName)) return;
+  const configured = allowedPackages.length > 0 ? allowedPackages.join(', ') : 'unset (empty)';
+  throw new GuardrailError(
+    'clear.notAllowed',
+    `clear_app_data refused for "${packageName}": ADBMCP_CLEAR_ALLOWED_PACKAGES is ${configured}. Add the package name (comma-separated) to ADBMCP_CLEAR_ALLOWED_PACKAGES to allow clearing its data.`,
+  );
 }
 
 /** Normalize an absolute device path for containment checks (no trailing slash). */

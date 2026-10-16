@@ -4,6 +4,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
 import { AdbError } from '../adb/errors.js';
+import { assertClearPackageAllowed } from '../config.js';
 import type { ServerContext } from '../context.js';
 import { quoteForDeviceShell } from '../util/shell.js';
 import { capText, guard, textResult } from './common.js';
@@ -21,6 +22,44 @@ function packageCommandError(operation: string, output: string, exitCode: number
     message: `${operation} failed (exit ${exitCode})${excerpt ? `: ${excerpt}` : ''}`,
     hint,
   });
+}
+
+/** Failure text `pm grant`/`pm revoke` can print even when adb exits 0. */
+const PM_PERMISSION_FAILURE =
+  /unknown permission|bad argument|not a debuggable app|operation not allowed|securityexception|error:/i;
+
+/** Turn a `pm grant`/`pm revoke` failure into a typed error with a cause-specific hint. */
+function permissionCommandError(operation: string, output: string, exitCode: number): AdbError {
+  if (/unknown permission/i.test(output)) {
+    return packageCommandError(
+      operation,
+      output,
+      exitCode,
+      'The device does not know that permission name. Find the exact name with `pm list permissions` and pass it verbatim, e.g. "android.permission.CAMERA".',
+    );
+  }
+  if (/not a debuggable app/i.test(output)) {
+    return packageCommandError(
+      operation,
+      output,
+      exitCode,
+      'Only debuggable apps accept pm grant/revoke. Install a debug build (android:debuggable="true", e.g. the debug variant) and retry.',
+    );
+  }
+  if (/bad argument/i.test(output)) {
+    return packageCommandError(
+      operation,
+      output,
+      exitCode,
+      'The device rejected the arguments. pm grant/revoke expect: pm grant|revoke <package> <permission>; verify the package name with list_packages and the permission spelling.',
+    );
+  }
+  return packageCommandError(
+    operation,
+    output,
+    exitCode,
+    'Common causes: the package is not installed (verify with list_packages), the permission is not a changeable runtime permission, or the device restricts pm grant/revoke.',
+  );
 }
 
 export function registerPackageTools(server: McpServer, ctx: ServerContext): void {
@@ -160,6 +199,135 @@ export function registerPackageTools(server: McpServer, ctx: ServerContext): voi
           );
         }
         return textResult(output.length > 0 ? output : `Uninstalled ${args.package} from ${serial}.`);
+      }),
+  );
+
+  server.registerTool(
+    'grant_permission',
+    {
+      title: 'Grant a runtime permission',
+      description:
+        'Grant a runtime permission to an app (`pm grant <package> <permission>`). Destructive: it changes the permissions the app holds; revoke_permission reverses it. Only changeable runtime permissions work, and the target app is normally expected to be debuggable.',
+      inputSchema: {
+        package: z.string().min(1).describe('Package name, e.g. "com.example.app".'),
+        permission: z.string().min(1).describe('Permission name, e.g. "android.permission.CAMERA".'),
+        device: DEVICE_ARG,
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args) =>
+      await guard(async () => {
+        const serial = await ctx.devices.resolve(args.device);
+        const command = ['pm', 'grant', args.package, args.permission]
+          .map(quoteForDeviceShell)
+          .join(' ');
+        const result = await ctx.runner.run(['shell', command], {
+          serial,
+          operation: 'grant_permission',
+          timeoutMs: ctx.config.limits.defaultTimeoutMs,
+          maxBytes: ctx.config.limits.maxOutputBytes,
+        });
+        const output = `${result.stdout}\n${result.stderr}`.trim();
+        if (result.exitCode !== 0 || PM_PERMISSION_FAILURE.test(output)) {
+          throw permissionCommandError(
+            `pm grant ${args.permission} to ${args.package} on ${serial}`,
+            output,
+            result.exitCode,
+          );
+        }
+        return textResult(
+          output.length > 0 ? output : `Granted ${args.permission} to ${args.package} on ${serial}.`,
+        );
+      }),
+  );
+
+  server.registerTool(
+    'revoke_permission',
+    {
+      title: 'Revoke a runtime permission',
+      description:
+        'Revoke a runtime permission from an app (`pm revoke <package> <permission>`). Destructive: the app loses the permission immediately and may fail until it is granted again.',
+      inputSchema: {
+        package: z.string().min(1).describe('Package name, e.g. "com.example.app".'),
+        permission: z.string().min(1).describe('Permission name, e.g. "android.permission.CAMERA".'),
+        device: DEVICE_ARG,
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args) =>
+      await guard(async () => {
+        const serial = await ctx.devices.resolve(args.device);
+        const command = ['pm', 'revoke', args.package, args.permission]
+          .map(quoteForDeviceShell)
+          .join(' ');
+        const result = await ctx.runner.run(['shell', command], {
+          serial,
+          operation: 'revoke_permission',
+          timeoutMs: ctx.config.limits.defaultTimeoutMs,
+          maxBytes: ctx.config.limits.maxOutputBytes,
+        });
+        const output = `${result.stdout}\n${result.stderr}`.trim();
+        if (result.exitCode !== 0 || PM_PERMISSION_FAILURE.test(output)) {
+          throw permissionCommandError(
+            `pm revoke ${args.permission} from ${args.package} on ${serial}`,
+            output,
+            result.exitCode,
+          );
+        }
+        return textResult(
+          output.length > 0 ? output : `Revoked ${args.permission} from ${args.package} on ${serial}.`,
+        );
+      }),
+  );
+
+  server.registerTool(
+    'clear_app_data',
+    {
+      title: 'Clear app data',
+      description:
+        'Delete all data stored by an app (`pm clear <package>`). Destructive and allowlist-gated: the server refuses unless the package is listed in ADBMCP_CLEAR_ALLOWED_PACKAGES (comma-separated); an unset or empty value refuses every clear.',
+      inputSchema: {
+        package: z.string().min(1).describe('Package name to clear, e.g. "com.example.app".'),
+        device: DEVICE_ARG,
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+    },
+    async (args) =>
+      await guard(async () => {
+        assertClearPackageAllowed(args.package, ctx.config.clearAllowedPackages);
+        const serial = await ctx.devices.resolve(args.device);
+        const command = ['pm', 'clear', args.package].map(quoteForDeviceShell).join(' ');
+        const result = await ctx.runner.run(['shell', command], {
+          serial,
+          operation: 'clear_app_data',
+          timeoutMs: ctx.config.limits.defaultTimeoutMs,
+          maxBytes: ctx.config.limits.maxOutputBytes,
+        });
+        const output = `${result.stdout}\n${result.stderr}`.trim();
+        if (result.exitCode !== 0 || /^\s*Failed\b|securityexception/im.test(output)) {
+          throw packageCommandError(
+            `pm clear ${args.package} on ${serial}`,
+            output,
+            result.exitCode,
+            'pm clear prints "Failed" (or a SecurityException) when the package is not installed or the device refuses to clear it; verify the name with list_packages. Some ROMs do not let the shell user clear other apps even when they are allowlisted.',
+          );
+        }
+        return textResult(output.length > 0 ? output : `Cleared data for ${args.package} on ${serial}.`);
       }),
   );
 }

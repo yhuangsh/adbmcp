@@ -1,6 +1,6 @@
 {
   "name": "adbmcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server exposing the Android Debug Bridge (adb) as tools, resources and prompts.",
   "license": "MIT",
   "type": "module",

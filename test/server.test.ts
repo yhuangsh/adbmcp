@@ -32,6 +32,15 @@ const EXPECTED_TOOLS = [
   'push_file',
   'forward_port',
   'remove_forward',
+  'reverse_port',
+  'remove_reverse',
+  'list_forwards',
+  'list_reverses',
+  'grant_permission',
+  'revoke_permission',
+  'clear_app_data',
+  'connect',
+  'disconnect',
   'start_activity',
   'force_stop_app',
   'get_ui_hierarchy',
@@ -95,6 +104,18 @@ describe('tool surface', () => {
     }
     expect(byName.get('uninstall_package')?.annotations?.destructiveHint).toBe(true);
     expect(byName.get('uninstall_package')?.annotations?.readOnlyHint).toBe(false);
+    for (const name of ['grant_permission', 'revoke_permission', 'clear_app_data']) {
+      expect(byName.get(name)?.annotations?.destructiveHint, name).toBe(true);
+      expect(byName.get(name)?.annotations?.readOnlyHint, name).toBe(false);
+    }
+    for (const name of ['list_forwards', 'list_reverses']) {
+      expect(byName.get(name)?.annotations?.readOnlyHint, name).toBe(true);
+      expect(byName.get(name)?.annotations?.destructiveHint, name).toBe(false);
+    }
+    for (const name of ['reverse_port', 'remove_reverse', 'connect', 'disconnect']) {
+      expect(byName.get(name)?.annotations?.readOnlyHint, name).toBe(false);
+      expect(byName.get(name)?.annotations?.destructiveHint, name).toBe(false);
+    }
     expect(byName.get('shell')?.annotations?.readOnlyHint).toBe(false);
     expect(byName.get('shell')?.annotations?.openWorldHint).toBe(true);
     expect(byName.get('pull_file')?.annotations?.readOnlyHint).toBe(false);
@@ -271,6 +292,136 @@ describe('package tools', () => {
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain('DELETE_FAILED_INTERNAL_ERROR');
     expect(harness.runner.calls[1]?.args).toEqual(['uninstall', 'com.example.app']);
+  });
+
+  it('grants and revokes a runtime permission through pm with device scoping', async () => {
+    const harness = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
+    const client = await connect(harness);
+
+    const granted = await client.callTool({
+      name: 'grant_permission',
+      arguments: { package: 'com.example.app', permission: 'android.permission.CAMERA' },
+    });
+    expect(granted.isError).toBeFalsy();
+    expect(textOf(granted)).toContain('Granted android.permission.CAMERA to com.example.app');
+    expect(harness.runner.calls[1]?.args).toEqual(['shell', 'pm grant com.example.app android.permission.CAMERA']);
+    expect(harness.runner.calls[1]?.options.serial).toBe('emulator-5554');
+
+    const revoked = await client.callTool({
+      name: 'revoke_permission',
+      arguments: { package: 'com.example.app', permission: 'android.permission.CAMERA' },
+    });
+    expect(revoked.isError).toBeFalsy();
+    expect(textOf(revoked)).toContain('Revoked android.permission.CAMERA from com.example.app');
+    expect(harness.runner.commands()).toContain('shell pm revoke com.example.app android.permission.CAMERA');
+  });
+
+  it('explains an Unknown permission failure from pm', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) =>
+        args[0] === 'shell' ? { stdout: 'Unknown permission: android.permission.BOGUS', exitCode: 1 } : undefined,
+      ),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({
+      name: 'grant_permission',
+      arguments: { package: 'com.example.app', permission: 'android.permission.BOGUS' },
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[COMMAND_FAILED]');
+    expect(textOf(result)).toContain('Unknown permission');
+    expect(textOf(result)).toContain('pm list permissions');
+  });
+
+  it('explains a not-a-debuggable-app failure from pm', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) =>
+        args[0] === 'shell'
+          ? { stderr: 'java.lang.SecurityException: Not a debuggable app', exitCode: 1 }
+          : undefined,
+      ),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({
+      name: 'revoke_permission',
+      arguments: { package: 'com.example.app', permission: 'android.permission.CAMERA' },
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[COMMAND_FAILED]');
+    expect(textOf(result)).toContain('debuggable');
+  });
+
+  it('maps a pm SecurityException to COMMAND_FAILED with the stderr excerpt', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) =>
+        args[0] === 'shell'
+          ? {
+              stderr:
+                "Exception occurred while executing 'grant':\njava.lang.SecurityException: grantRuntimePermission: Neither user 2000 nor current process has android.permission.GRANT_RUNTIME_PERMISSIONS.",
+              exitCode: 255,
+            }
+          : undefined,
+      ),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({
+      name: 'grant_permission',
+      arguments: { package: 'com.example.app', permission: 'android.permission.CAMERA' },
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[COMMAND_FAILED]');
+    expect(textOf(result)).toContain('GRANT_RUNTIME_PERMISSIONS');
+  });
+
+  it('refuses clear_app_data when the package is not allowlisted, before touching adb', async () => {
+    const harness = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'clear_app_data', arguments: { package: 'com.example.app' } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[clear.notAllowed]');
+    expect(textOf(result)).toContain('ADBMCP_CLEAR_ALLOWED_PACKAGES');
+    expect(harness.runner.calls).toEqual([]);
+  });
+
+  it('clears data for a package listed in ADBMCP_CLEAR_ALLOWED_PACKAGES', async () => {
+    const harness = createHarness({
+      env: { ADBMCP_CLEAR_ALLOWED_PACKAGES: 'com.example.app, com.example.dev' },
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) => (args[0] === 'shell' ? { stdout: 'Success' } : undefined)),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'clear_app_data', arguments: { package: 'com.example.app' } });
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('Success');
+    expect(harness.runner.commands()).toContain('shell pm clear com.example.app');
+    expect(harness.runner.calls[1]?.options.serial).toBe('emulator-5554');
+  });
+
+  it('treats a pm clear "Failed" line on stdout as a failure even when adb exits 0', async () => {
+    const harness = createHarness({
+      env: { ADBMCP_CLEAR_ALLOWED_PACKAGES: 'com.example.app' },
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) =>
+        args[0] === 'shell' ? { stdout: 'Failed', exitCode: 0 } : undefined,
+      ),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'clear_app_data', arguments: { package: 'com.example.app' } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('Failed');
+  });
+
+  it('treats a pm clear SecurityException on stdout as a failure even when adb exits 0', async () => {
+    const harness = createHarness({
+      env: { ADBMCP_CLEAR_ALLOWED_PACKAGES: 'com.example.app' },
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) =>
+        args[0] === 'shell'
+          ? { stdout: 'java.lang.SecurityException: Shell cannot clear other apps\' data', exitCode: 0 }
+          : undefined,
+      ),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'clear_app_data', arguments: { package: 'com.example.app' } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('SecurityException');
   });
 });
 
@@ -503,6 +654,184 @@ describe('app and ui tools', () => {
     const harness = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
     const client = await connect(harness);
     const result = await client.callTool({ name: 'forward_port', arguments: { local: '8080', remote: 'tcp:8080' } });
+    expect(result.isError).toBe(true);
+    expect(harness.runner.calls).toEqual([]);
+  });
+
+  it('reverses a port from the device to the host and removes it', async () => {
+    const harness = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
+    const client = await connect(harness);
+
+    const reversed = await client.callTool({
+      name: 'reverse_port',
+      arguments: { remote: 'tcp:18900', local: 'tcp:18901' },
+    });
+    expect(reversed.isError).toBeFalsy();
+    expect(textOf(reversed)).toContain('Reversed tcp:18900 -> tcp:18901 on emulator-5554');
+    expect(harness.runner.calls[1]?.args).toEqual(['reverse', 'tcp:18900', 'tcp:18901']);
+    expect(harness.runner.calls[1]?.options.serial).toBe('emulator-5554');
+
+    const noRebind = await client.callTool({
+      name: 'reverse_port',
+      arguments: { remote: 'tcp:18900', local: 'tcp:18901', no_rebind: true },
+    });
+    expect(noRebind.isError).toBeFalsy();
+    expect(harness.runner.calls[3]?.args).toEqual(['reverse', '--no-rebind', 'tcp:18900', 'tcp:18901']);
+
+    const removed = await client.callTool({ name: 'remove_reverse', arguments: { remote: 'tcp:18900' } });
+    expect(removed.isError).toBeFalsy();
+    expect(harness.runner.commands()).toContain('reverse --remove tcp:18900');
+  });
+
+  it('lists forwards and reverses as structured JSON', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) => {
+        if (args[0] === 'forward' && args[1] === '--list') {
+          return { stdout: 'emulator-5554 tcp:8080 tcp:8080\n' };
+        }
+        // adb reverse --list prints the transport name in the first column, not the serial.
+        if (args[0] === 'reverse' && args[1] === '--list') {
+          return { stdout: 'UsbFfs tcp:18900 tcp:18901\n' };
+        }
+        return undefined;
+      }),
+    });
+    const client = await connect(harness);
+
+    const forwards = await client.callTool({ name: 'list_forwards', arguments: {} });
+    expect(forwards.isError).toBeFalsy();
+    expect(JSON.parse(textOf(forwards))).toEqual([
+      { serial: 'emulator-5554', local: 'tcp:8080', remote: 'tcp:8080' },
+    ]);
+
+    const reverses = await client.callTool({ name: 'list_reverses', arguments: {} });
+    expect(reverses.isError).toBeFalsy();
+    expect(JSON.parse(textOf(reverses))).toEqual([
+      { serial: 'emulator-5554', remote: 'tcp:18900', local: 'tcp:18901' },
+    ]);
+
+    expect(harness.runner.calls[1]?.args).toEqual(['forward', '--list']);
+    expect(harness.runner.calls[1]?.options.serial).toBe('emulator-5554');
+    expect(harness.runner.calls[3]?.args).toEqual(['reverse', '--list']);
+    expect(harness.runner.calls[3]?.options.serial).toBe('emulator-5554');
+  });
+
+  it('returns an empty JSON list when nothing is forwarded or reversed', async () => {
+    const client = await connect(createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) }));
+    const forwards = await client.callTool({ name: 'list_forwards', arguments: {} });
+    expect(forwards.isError).toBeFalsy();
+    expect(JSON.parse(textOf(forwards))).toEqual([]);
+    const reverses = await client.callTool({ name: 'list_reverses', arguments: {} });
+    expect(reverses.isError).toBeFalsy();
+    expect(JSON.parse(textOf(reverses))).toEqual([]);
+  });
+
+  it('rejects a malformed reverse spec and an unknown serial before touching the device', async () => {
+    const malformed = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
+    const client = await connect(malformed);
+    const bad = await client.callTool({
+      name: 'reverse_port',
+      arguments: { remote: '18900', local: 'tcp:18901' },
+    });
+    expect(bad.isError).toBe(true);
+    expect(malformed.runner.calls).toEqual([]);
+
+    const unknownDevice = await connect(createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) }));
+    const missing = await unknownDevice.callTool({
+      name: 'reverse_port',
+      arguments: { remote: 'tcp:18900', local: 'tcp:18901', device: 'NOPE-DOES-NOT-EXIST' },
+    });
+    expect(missing.isError).toBe(true);
+    expect(textOf(missing)).toContain('[NO_DEVICE]');
+  });
+});
+
+describe('wireless TCP/IP tools', () => {
+  it('connects to a host:port without resolving a device serial', async () => {
+    const harness = createHarness({
+      handler: (args) => (args[0] === 'connect' ? { stdout: 'connected to 192.168.1.42:5555' } : undefined),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'connect', arguments: { address: '192.168.1.42:5555' } });
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('connected to 192.168.1.42:5555');
+    // connect is host-level: no `adb devices` lookup and no `-s` scoping.
+    expect(harness.runner.calls.map((call) => call.args)).toEqual([['connect', '192.168.1.42:5555']]);
+  });
+
+  it('treats "failed to connect" output as an error even though adb exits 0', async () => {
+    const harness = createHarness({
+      handler: (args) =>
+        args[0] === 'connect'
+          ? { stderr: "failed to connect to '192.168.1.42:5555': Connection refused", exitCode: 0 }
+          : undefined,
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'connect', arguments: { address: '192.168.1.42:5555' } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[COMMAND_FAILED]');
+    expect(textOf(result)).toContain('Connection refused');
+    // Android 11+ needs pairing first; the hint points at the planned pairing tool.
+    expect(textOf(result)).toContain('wireless_pair');
+  });
+
+  it('treats "already connected to" success output as a success, not a failure', async () => {
+    const harness = createHarness({
+      handler: (args) => (args[0] === 'connect' ? { stdout: 'already connected to 192.168.1.42:5555' } : undefined),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'connect', arguments: { address: '192.168.1.42:5555' } });
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('already connected to 192.168.1.42:5555');
+  });
+
+  it('reports a non-zero connect exit code as an error even without failure prose', async () => {
+    const harness = createHarness({
+      handler: (args) => (args[0] === 'connect' ? { stdout: '', stderr: '', exitCode: 1 } : undefined),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'connect', arguments: { address: '192.168.1.42:5555' } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[COMMAND_FAILED]');
+  });
+
+  it('rejects a malformed connect address before spawning adb', async () => {
+    const harness = createHarness();
+    const client = await connect(harness);
+    for (const address of ['192.168.1.42', '192.168.1.42:0', '192.168.1.42:99999', 'bad host:5555']) {
+      const result = await client.callTool({ name: 'connect', arguments: { address } });
+      expect(result.isError, address).toBe(true);
+    }
+    expect(harness.runner.calls).toEqual([]);
+  });
+
+  it('disconnects one address or every TCP/IP device', async () => {
+    const harness = createHarness({
+      handler: (args) =>
+        args[0] === 'disconnect'
+          ? { stdout: args.length > 1 ? `disconnected ${args[1]}` : 'disconnected everything' }
+          : undefined,
+    });
+    const client = await connect(harness);
+
+    const one = await client.callTool({ name: 'disconnect', arguments: { address: '192.168.1.42:5555' } });
+    expect(one.isError).toBeFalsy();
+    expect(textOf(one)).toContain('disconnected 192.168.1.42:5555');
+
+    const all = await client.callTool({ name: 'disconnect', arguments: {} });
+    expect(all.isError).toBeFalsy();
+    expect(textOf(all)).toContain('disconnected everything');
+
+    expect(harness.runner.calls.map((call) => call.args)).toEqual([
+      ['disconnect', '192.168.1.42:5555'],
+      ['disconnect'],
+    ]);
+  });
+
+  it('rejects a malformed disconnect address before spawning adb', async () => {
+    const harness = createHarness();
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'disconnect', arguments: { address: '192.168.1.42:70000' } });
     expect(result.isError).toBe(true);
     expect(harness.runner.calls).toEqual([]);
   });

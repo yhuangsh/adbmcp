@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  assertClearPackageAllowed,
   assertShellCommandAllowed,
   DEFAULT_PUSH_ALLOWED_ROOTS,
   DEFAULT_SHELL_BLOCKED_PATTERNS,
@@ -43,6 +44,40 @@ describe('loadConfig', () => {
 
   it('uses the documented default push roots', () => {
     expect(loadConfig({}).pushAllowedRoots).toEqual([...DEFAULT_PUSH_ALLOWED_ROOTS]);
+  });
+
+  it('parses ADBMCP_CLEAR_ALLOWED_PACKAGES with no allow-all default', () => {
+    expect(loadConfig({}).clearAllowedPackages).toEqual([]);
+    expect(loadConfig({ ADBMCP_CLEAR_ALLOWED_PACKAGES: 'com.example.app, com.example.dev' }).clearAllowedPackages).toEqual([
+      'com.example.app',
+      'com.example.dev',
+    ]);
+    expect(loadConfig({ ADBMCP_CLEAR_ALLOWED_PACKAGES: '   ' }).clearAllowedPackages).toEqual([]);
+  });
+});
+
+describe('assertClearPackageAllowed', () => {
+  it('allows an allowlisted package and refuses everything else (fail-closed on case/whitespace variants)', () => {
+    const allowed = ['com.example.app'];
+    expect(() => assertClearPackageAllowed('com.example.app', allowed)).not.toThrow();
+    expect(() => assertClearPackageAllowed('com.example.other', allowed)).toThrow(GuardrailError);
+    expect(() => assertClearPackageAllowed('Com.Example.App', allowed)).toThrow(GuardrailError);
+    expect(() => assertClearPackageAllowed('com.example.app ', allowed)).toThrow(GuardrailError);
+    expect(() => assertClearPackageAllowed('com.example.app:*', allowed)).toThrow(GuardrailError);
+  });
+
+  it('refuses every package when the allowlist is empty, naming the env var', () => {
+    const error = (() => {
+      try {
+        assertClearPackageAllowed('com.example.app', []);
+        return null;
+      } catch (cause) {
+        return cause as GuardrailError;
+      }
+    })();
+    expect(error?.rule).toBe('clear.notAllowed');
+    expect(error?.message).toContain('ADBMCP_CLEAR_ALLOWED_PACKAGES');
+    expect(error?.message).toContain('unset (empty)');
   });
 });
 

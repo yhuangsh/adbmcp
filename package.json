@@ -1,9 +1,12 @@
 {
-  "name": "adbmcp",
+  "name": "@yhuangsh/adbmcp",
   "version": "0.2.1",
   "description": "MCP server exposing the Android Debug Bridge (adb) as tools, resources and prompts.",
   "license": "MIT",
   "author": "Yong Huang",
+  "publishConfig": {
+    "access": "public"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/yhuangsh/adbmcp.git"

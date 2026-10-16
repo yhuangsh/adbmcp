@@ -23,8 +23,8 @@ Requires Node.js >= 20 and Android platform-tools (`adb`) on `PATH` — or `ADB_
 binary.
 
 ```bash
-# from npm (once published)
-npx -y adbmcp
+# from npm
+npx -y @yhuangsh/adbmcp
 
 # from a checkout
 git clone https://github.com/yhuangsh/adbmcp.git git clone <repo> && cd adbmcpgit clone <repo> && cd adbmcp cd adbmcp

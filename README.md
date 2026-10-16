@@ -1,5 +1,9 @@
 # adbmcp — Android Debug Bridge, as MCP tools
 
+[![CI](https://github.com/yhuangsh/adbmcp/actions/workflows/ci.yml/badge.svg)](https://github.com/yhuangsh/adbmcp/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@yhuangsh/adbmcp)](https://www.npmjs.com/package/@yhuangsh/adbmcp)
+[![license](https://img.shields.io/npm/l/@yhuangsh/adbmcp)](./LICENSE)
+
 `adbmcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that exposes the
 Android Debug Bridge (`adb`) to AI agents: list devices, run shell commands, install apps, read
 logcat, take screenshots, transfer files, forward ports, manage app permissions and connect to
@@ -27,7 +31,7 @@ binary.
 npx -y @yhuangsh/adbmcp
 
 # from a checkout
-git clone https://github.com/yhuangsh/adbmcp.git git clone <repo> && cd adbmcpgit clone <repo> && cd adbmcp cd adbmcp
+git clone https://github.com/yhuangsh/adbmcp.git && cd adbmcp
 npm install
 npm run build
 node dist/index.js        # speaks MCP on stdin/stdout

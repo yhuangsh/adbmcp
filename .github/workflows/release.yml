@@ -1,0 +1,37 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  publish:
+    # Only publish releases from the main repo, never forks.
+    if: github.repository == 'yhuangsh/adbmcp'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # npm provenance (signed, links the tarball to this repo)
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      # Package version must match the pushed tag; the guard below enforces it.
+      - name: Verify tag matches package version
+        run: |
+          TAG="${GITHUB_REF_NAME#v}"
+          PKG="$(node -p "require('./package.json').version")"
+          if [ "$TAG" != "$PKG" ]; then
+            echo "::error::git tag v$TAG does not match package.json version $PKG"
+            exit 1
+          fi
+      - run: npm publish
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

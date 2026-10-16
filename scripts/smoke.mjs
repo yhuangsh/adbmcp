@@ -3,6 +3,7 @@
  * Live smoke test for adbmcp against a real device.
  * Drives the built server (dist/index.js) over stdio with the official MCP SDK client.
  * State-restoring: install→uninstall round-trip, pushed files cleaned up, forwards/reverses removed.
+ * Input injection is exercised only through pre-spawn rejections — no live taps/swipes/typing/key events.
  *
  * Expects ADBMCP_CLEAR_ALLOWED_PACKAGES to not list the throwaway package used for the
  * clear_app_data refusal check (any normal allowlist satisfies this).
@@ -35,7 +36,7 @@ console.log('connected to adbmcp over stdio\n');
 
 // --- 1. tool/prompt/resource discovery -------------------------------------
 const tools = await client.listTools();
-check('tools/list returns 28 tools', tools.tools.length === 28, `got ${tools.tools.length}`);
+check('tools/list returns 34 tools', tools.tools.length === 34, `got ${tools.tools.length}`);
 const prompts = await client.listPrompts();
 check('prompts/list returns 3 prompts', prompts.prompts.length === 3, `got ${prompts.prompts.length}`);
 const res = await client.readResource({ uri: 'adb://devices' });
@@ -169,7 +170,21 @@ check(
   text(clearRefused).slice(0, 160).replace(/\n/g, ' '),
 );
 
-// --- 10. cleanup + shutdown hygiene -----------------------------------------
+// --- 10. v0.3.0 non-invasive checks (read-only dumpsys + pre-spawn rejections) --
+// No live taps/swipes/typing/key events: the device is the user's personal phone.
+const dump = await client.callTool({ name: 'dumpsys_query', arguments: { service: 'battery', device: serial } });
+check('dumpsys_query battery (read-only)', !isErr(dump) && text(dump).trim().length > 0, text(dump).split('\n')[0].slice(0, 90));
+const badTap = await client.callTool({ name: 'tap', arguments: { x: -1, y: 10, device: serial } });
+check('tap with a negative coordinate rejected before adb', isErr(badTap), text(badTap).slice(0, 140).replace(/\n/g, ' '));
+const badPair = await client.callTool({ name: 'wireless_pair', arguments: { host: '192.168.1.42', pair_port: 37421, code: '12345' } });
+check('wireless_pair with a bad code rejected before adb', isErr(badPair), text(badPair).slice(0, 160).replace(/\n/g, ' '));
+// type_text's input-layer half (%s unescape, keymap) is live-unverified: typing
+// needs a focused field and would mutate the UI. The shell-quoting half is
+// verified here via echo, which exercises the same device-sh tokenization.
+const echo = await client.callTool({ name: 'shell', arguments: { command: "echo 'don'\\''t%sstop'", device: serial } });
+check('device shell parses the type_text quoting idiom', !isErr(echo) && text(echo).trim() === "don't%sstop", text(echo).slice(0, 120));
+
+// --- 11. cleanup + shutdown hygiene -----------------------------------------
 await client.callTool({ name: 'shell', arguments: { command: 'rm -r /data/local/tmp/adbmcp-smoke', device: serial } });
 check('device cleanup (rm pushed dir)', true);
 await client.close(); // SIGTERMs the server → SIGTERM handler → registry.closeAll()

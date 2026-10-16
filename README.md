@@ -6,8 +6,9 @@
 
 `adbmcp` is a [Model Context Protocol](https://modelcontextprotocol.io) server that exposes the
 Android Debug Bridge (`adb`) to AI agents: list devices, run shell commands, install apps, read
-logcat, take screenshots, transfer files, forward ports, manage app permissions and connect to
-devices over Wi-Fi. It is a thin, predictable wrapper around the official
+logcat, take screenshots, drive the UI (tap/swipe/type/key events), query system services with
+`dumpsys`, transfer files, forward ports, manage app permissions and pair/connect to devices over
+Wi-Fi. It is a thin, predictable wrapper around the official
 `adb` binary — no re-implemented adb protocol, no test framework, no extra state.
 
 - **Multi-device first** — every device-scoped tool takes an optional `device` serial and every adb
@@ -19,7 +20,7 @@ devices over Wi-Fi. It is a thin, predictable wrapper around the official
   are enforced even if a host ignores annotations.
 - **stdio transport** — the client launches `adbmcp` as a subprocess, the normal MCP deployment.
 
-Implements the MVP plus v2.0 items 1–3 in [`docs/design/product-design-v0.md`](docs/design/product-design-v0.md).
+Implements the MVP plus v2.0 items 1–6 in [`docs/design/product-design-v0.md`](docs/design/product-design-v0.md).
 
 ## Install
 
@@ -82,6 +83,7 @@ Annotation columns: **RO** = `readOnlyHint`, **D** = `destructiveHint`, **I** = 
 | --- | --- | --- | --- | --- | --- |
 | `list_devices` | `adb devices -l`: serial, state, model, allowlist status | ✅ | — | ✅ | — |
 | `get_device_info` | Curated build properties (model, Android version, SDK, ABI) + screen size/density | ✅ | — | ✅ | — |
+| `dumpsys_query` | Curated `dumpsys` dump — battery/activity/window/connectivity, capped at 64 KB | ✅ | — | ✅ | — |
 | `shell` | Arbitrary `adb shell` command — the power-user escape hatch, guardrailed | — | — | — | ✅ |
 | `list_packages` | `pm list packages`, optional substring filter | ✅ | — | ✅ | — |
 | `install_apk` | `adb install` a host APK, `replace` for `-r` | — | — | — | — |
@@ -104,9 +106,14 @@ Annotation columns: **RO** = `readOnlyHint`, **D** = `destructiveHint`, **I** = 
 | `list_reverses` | `adb reverse --list` as JSON `{serial, remote, local}` | ✅ | — | ✅ | — |
 | `connect` | `adb connect host:port` — TCP/IP wireless without pairing | — | — | ✅ | ✅ |
 | `disconnect` | `adb disconnect [host:port]`; no address disconnects every TCP/IP device | — | — | ✅ | ✅ |
+| `wireless_pair` | `adb pair host:pair_port code` — Android 11+ pairing, step one of connect | — | — | ✅ | ✅ |
 | `start_activity` | `am start` by component or action, `wait` for `-W` | — | — | — | — |
 | `force_stop_app` | `am force-stop` | — | — | ✅ | — |
 | `get_ui_hierarchy` | `uiautomator dump` XML with bounds/ids/text | ✅ | — | ✅ | — |
+| `tap` | `input tap x y` — tap a screen coordinate (device pixels) | — | — | — | — |
+| `swipe` | `input swipe x1 y1 x2 y2 [duration_ms]` — scroll or drag | — | — | — | — |
+| `type_text` | `input text` with `%s` space encoding and device-shell quoting | — | — | — | — |
+| `key_event` | `input keyevent` — named key (HOME, BACK, …) or keycode 0–300 | — | — | — | — |
 | `adb_server_restart` | `kill-server` + `start-server` recovery for version conflicts | — | — | — | — |
 
 Also shipped:
@@ -117,9 +124,9 @@ Also shipped:
   of the tools above.
 
 `uninstall_package`, `grant_permission`, `revoke_permission` and `clear_app_data` are the tools with
-`destructiveHint: true`; `shell`, `push_file`, `connect` and `disconnect` are the `openWorldHint:
-true` tools. They are never merged with read-only tools, so hosts can auto-approve reads and confirm
-writes.
+`destructiveHint: true`; `shell`, `push_file`, `connect`, `disconnect` and `wireless_pair` are the
+`openWorldHint: true` tools. They are never merged with read-only tools, so hosts can auto-approve
+reads and confirm writes.
 
 ## Configuration
 
@@ -181,15 +188,17 @@ src/
   adb/runner.ts       subprocess per call: -s scoping, timeouts, head+tail caps
   adb/errors.ts       typed causes mapped from adb stderr/exit codes
   streams/registry.ts long-running logcat handles + ring buffer
-  tools/              one module per tool group (28 tools, MVP + v2.0 items 1–3)
+  tools/              one module per tool group (34 tools, MVP + v2.0 items 1–6)
   resources/devices.ts, prompts/index.ts
 test/                 vitest suites (fakes in test/helpers/)
 ```
 
 ## Status
 
-Implements the MVP plus v2.0 items 1–3 from the design (§4.2): reverse port forwards and structured
-forward/reverse listings, `pm grant`/`revoke` plus allowlist-gated `clear_app_data`, and wireless
-TCP/IP `connect`/`disconnect`. Not implemented: wireless pairing (`adb pair`), input injection,
-`dumpsys` helpers, `screenrecord`, `bugreport`, Streamable HTTP transport, iOS, emulator lifecycle
-management. Windows is best-effort (POSIX-first, like most of the ecosystem).
+Implements the MVP plus v2.0 items 1–6 from the design (§4.2): reverse port forwards and structured
+forward/reverse listings, `pm grant`/`revoke` plus allowlist-gated `clear_app_data`, wireless
+TCP/IP `connect`/`disconnect`/`wireless_pair`, first-class input injection (`tap`, `swipe`,
+`type_text`, `key_event` — typed schemas that fix the `input text` quoting footgun, no DSL), and the
+curated `dumpsys_query`. Not implemented: `screenrecord`, `bugreport`, Streamable HTTP transport,
+iOS, emulator lifecycle management. Windows is best-effort (POSIX-first, like most of the
+ecosystem).

@@ -78,12 +78,12 @@ Also in MVP: **Prompts** — a small set of prompt templates (`debug_crash`, `in
 **v0.1.1 first (hygiene, outranks all features):** npm publish, GitHub remote, CI matrix (ubuntu/macOS/windows — Windows is currently *unmeasured*, not best-effort), README polish.
 
 **v2.0 cut list, in order:**
-1. `reverse_port` / `remove_reverse` / `list_forwards` — mirror-symmetry with forwards; existing PORT_SPEC validation
-2. `grant_permission` / `revoke_permission` (`destructiveHint: true`) / `clear_app_data` (allowlist-gated)
-3. `connect` / `disconnect` — TCP/IP wireless without pairing; most "wireless debugging" asks are just this
-4. `tap` / `swipe` / `type_text` / `key_event` — minimal first-class input injection (typed schemas fix the `input text` quoting footgun; no DSL per §7)
-5. `dumpsys_query` — curated: battery, activity, window, connectivity
-6. `wireless_pair` — pairing `code` as a **required argument** (the chat is the elicitation channel); MCP elicitation only as later progressive enhancement
+1. `reverse_port` / `remove_reverse` / `list_forwards` — mirror-symmetry with forwards; existing PORT_SPEC validation — **shipped (v0.2.0)**
+2. `grant_permission` / `revoke_permission` (`destructiveHint: true`) / `clear_app_data` (allowlist-gated) — **shipped (v0.2.0)**
+3. `connect` / `disconnect` — TCP/IP wireless without pairing; most "wireless debugging" asks are just this — **shipped (v0.2.0)**
+4. `tap` / `swipe` / `type_text` / `key_event` — minimal first-class input injection (typed schemas fix the `input text` quoting footgun; no DSL per §7) — **shipped (v0.3.0)**
+5. `dumpsys_query` — curated: battery, activity, window, connectivity — **shipped (v0.3.0)**
+6. `wireless_pair` — pairing `code` as a **required argument** (the chat is the elicitation channel); MCP elicitation only as later progressive enhancement — **shipped (v0.3.0)**
 
 **Explicitly out of v2.0:** Streamable HTTP transport (speculative multi-tenant infra; additive later), `screenrecord` (needs a job lifecycle, not the stream registry), `bugreport` (10–50 MB artifact agents can't consume), emulator management (different binary/lifecycle/trust surface — separate server when farm demand is real), resource subscriptions/notifications.
 

@@ -41,9 +41,15 @@ const EXPECTED_TOOLS = [
   'clear_app_data',
   'connect',
   'disconnect',
+  'wireless_pair',
   'start_activity',
   'force_stop_app',
+  'tap',
+  'swipe',
+  'type_text',
+  'key_event',
   'get_ui_hierarchy',
+  'dumpsys_query',
   'adb_server_restart',
 ];
 
@@ -120,6 +126,24 @@ describe('tool surface', () => {
     expect(byName.get('shell')?.annotations?.openWorldHint).toBe(true);
     expect(byName.get('pull_file')?.annotations?.readOnlyHint).toBe(false);
     expect(byName.get('install_apk')?.annotations?.destructiveHint).toBe(false);
+
+    // v0.3.0 additions: dumpsys is a read; input injection and pairing are writes.
+    expect(byName.get('dumpsys_query')?.annotations?.readOnlyHint).toBe(true);
+    expect(byName.get('dumpsys_query')?.annotations?.destructiveHint).toBe(false);
+    expect(byName.get('dumpsys_query')?.annotations?.idempotentHint).toBe(true);
+    expect(byName.get('dumpsys_query')?.annotations?.openWorldHint).toBe(false);
+    for (const name of ['tap', 'swipe', 'type_text', 'key_event']) {
+      expect(byName.get(name)?.annotations?.readOnlyHint, name).toBe(false);
+      expect(byName.get(name)?.annotations?.destructiveHint, name).toBe(false);
+      // Every call injects a fresh UI event; repeating it acts again (double-tap,
+      // further scroll, another BACK), so none of these is idempotent.
+      expect(byName.get(name)?.annotations?.idempotentHint, name).toBe(false);
+      expect(byName.get(name)?.annotations?.openWorldHint, name).toBe(false);
+    }
+    expect(byName.get('wireless_pair')?.annotations?.readOnlyHint).toBe(false);
+    expect(byName.get('wireless_pair')?.annotations?.destructiveHint).toBe(false);
+    expect(byName.get('wireless_pair')?.annotations?.idempotentHint).toBe(true);
+    expect(byName.get('wireless_pair')?.annotations?.openWorldHint).toBe(true);
   });
 });
 
@@ -746,6 +770,195 @@ describe('app and ui tools', () => {
   });
 });
 
+describe('input injection tools', () => {
+  it('taps a coordinate through adb shell with -s scoping', async () => {
+    const harness = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'tap', arguments: { x: 540, y: 1200 } });
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('Tapped (540, 1200)');
+    expect(harness.runner.calls[1]?.args).toEqual(['shell', 'input tap 540 1200']);
+    expect(harness.runner.calls[1]?.options.serial).toBe('emulator-5554');
+  });
+
+  it('rejects negative, fractional and non-numeric tap coordinates before spawning adb', async () => {
+    const harness = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
+    const client = await connect(harness);
+    const invalid: Array<Record<string, unknown>> = [
+      { x: -1, y: 10 },
+      { x: 10, y: -1 },
+      { x: 1.5, y: 10 },
+      { x: '10', y: 10 },
+    ];
+    for (const args of invalid) {
+      const result = await client.callTool({ name: 'tap', arguments: args });
+      expect(result.isError, JSON.stringify(args)).toBe(true);
+    }
+    expect(harness.runner.calls).toEqual([]);
+  });
+
+  it('swipes with and without an explicit duration', async () => {
+    const harness = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
+    const client = await connect(harness);
+
+    await client.callTool({ name: 'swipe', arguments: { x1: 1, y1: 2, x2: 3, y2: 4 } });
+    expect(harness.runner.calls[1]?.args).toEqual(['shell', 'input swipe 1 2 3 4']);
+
+    await client.callTool({ name: 'swipe', arguments: { x1: 1, y1: 2, x2: 3, y2: 4, duration_ms: 800 } });
+    expect(harness.runner.calls[3]?.args).toEqual(['shell', 'input swipe 1 2 3 4 800']);
+    // The adb client must stay alive for the gesture it injects.
+    expect(harness.runner.calls[3]?.options.timeoutMs).toBe(harness.config.limits.defaultTimeoutMs + 800);
+  });
+
+  it('rejects a non-positive swipe duration before spawning adb', async () => {
+    const harness = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
+    const client = await connect(harness);
+    const result = await client.callTool({
+      name: 'swipe',
+      arguments: { x1: 0, y1: 0, x2: 1, y2: 1, duration_ms: 0 },
+    });
+    expect(result.isError).toBe(true);
+    expect(harness.runner.calls).toEqual([]);
+  });
+
+  it('encodes type_text spaces as %s and quotes device-shell metacharacters', async () => {
+    const harness = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
+    const client = await connect(harness);
+    const cases: Array<[string, string]> = [
+      ['hello world', 'input text hello%sworld'],
+      ['a b c', 'input text a%sb%sc'],
+      ["don't stop", "input text 'don'\\''t%sstop'"],
+      ['say "hi"', 'input text \'say%s"hi"\''],
+      ['a;b&c|d', "input text 'a;b&c|d'"],
+      ['$(id) `whoami`', "input text '$(id)%s`whoami`'"],
+      ['a<b>c', "input text 'a<b>c'"],
+      ['a\\b', "input text 'a\\b'"],
+      ['star*question?~', "input text 'star*question?~'"],
+      ['héllo wörld', "input text 'héllo%swörld'"],
+      ['100%', 'input text 100%'],
+      ['line one\nline two', "input text 'line%sone\nline%stwo'"], // spaces→%s; newline stays literal inside quotes (keymap → ENTER)
+      ['a\tb', "input text 'a\tb'"],
+      ["end'", "input text 'end'\\'''"],
+      ['100%s done', 'input text 100%s%sdone'],
+      ['hi 👋', "input text 'hi%s👋'"],
+      ['-rf', 'input text -rf'],
+    ];
+    for (const [text, expected] of cases) {
+      const result = await client.callTool({ name: 'type_text', arguments: { text } });
+      expect(result.isError, text).toBeFalsy();
+      expect(harness.runner.calls.at(-1)?.args, text).toEqual(['shell', expected]);
+    }
+    for (const call of harness.runner.calls.filter((entry) => entry.args[0] === 'shell')) {
+      expect(call.options.serial).toBe('emulator-5554');
+    }
+  });
+
+  it('rejects empty type_text before spawning adb', async () => {
+    const harness = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'type_text', arguments: { text: '' } });
+    expect(result.isError).toBe(true);
+    expect(harness.runner.calls).toEqual([]);
+  });
+
+  it('maps every named key to its Android keycode', async () => {
+    const harness = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
+    const client = await connect(harness);
+    const named: Array<[string, number]> = [
+      ['HOME', 3],
+      ['BACK', 4],
+      ['ENTER', 66],
+      ['DEL', 67],
+      ['MENU', 82],
+      ['POWER', 26],
+      ['VOLUME_UP', 24],
+      ['VOLUME_DOWN', 25],
+      ['TAB', 61],
+      ['ESCAPE', 111],
+      ['APP_SWITCH', 187],
+      ['WAKEUP', 224],
+      ['SLEEP', 223],
+    ];
+    for (const [key, code] of named) {
+      const result = await client.callTool({ name: 'key_event', arguments: { key } });
+      expect(result.isError, key).toBeFalsy();
+      expect(harness.runner.calls.at(-1)?.args, key).toEqual(['shell', `input keyevent ${code}`]);
+    }
+  });
+
+  it('accepts a raw keycode and rejects unknown names or out-of-range codes pre-spawn', async () => {
+    const harness = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
+    const client = await connect(harness);
+
+    const numeric = await client.callTool({ name: 'key_event', arguments: { key: 26 } });
+    expect(numeric.isError).toBeFalsy();
+    expect(harness.runner.calls.at(-1)?.args).toEqual(['shell', 'input keyevent 26']);
+
+    const unknown = await client.callTool({ name: 'key_event', arguments: { key: 'HOM' } });
+    expect(unknown.isError).toBe(true);
+    expect(textOf(unknown)).toContain('HOME');
+    expect(textOf(unknown)).toContain('keycode 0-300');
+
+    const callsAfterNumeric = harness.runner.calls.length;
+    for (const key of ['HOM', 'home', 301, -1, 1.5]) {
+      const result = await client.callTool({ name: 'key_event', arguments: { key } });
+      expect(result.isError, String(key)).toBe(true);
+      expect(harness.runner.calls.length, String(key)).toBe(callsAfterNumeric);
+    }
+  });
+});
+
+describe('dumpsys_query', () => {
+  it('queries a curated service and token-quotes extra args', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) =>
+        args[0] === 'shell' ? { stdout: 'Current Battery Service state:\n  level: 87' } : undefined,
+      ),
+    });
+    const client = await connect(harness);
+
+    const battery = await client.callTool({ name: 'dumpsys_query', arguments: { service: 'battery' } });
+    expect(battery.isError).toBeFalsy();
+    expect(textOf(battery)).toContain('level: 87');
+    expect(harness.runner.calls[1]?.args).toEqual(['shell', 'dumpsys battery']);
+    expect(harness.runner.calls[1]?.options.serial).toBe('emulator-5554');
+
+    const activity = await client.callTool({
+      name: 'dumpsys_query',
+      arguments: { service: 'activity', extra_args: 'activities com.example.app' },
+    });
+    expect(activity.isError).toBeFalsy();
+    expect(harness.runner.calls[3]?.args).toEqual(['shell', 'dumpsys activity activities com.example.app']);
+  });
+
+  it('rejects an uncurated service before spawning adb and names the valid ones', async () => {
+    const harness = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'dumpsys_query', arguments: { service: 'cpuinfo' } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('battery');
+    expect(textOf(result)).toContain('connectivity');
+    expect(harness.runner.calls).toEqual([]);
+  });
+
+  it('caps the runner budget for huge dumps while respecting a smaller configured cap', async () => {
+    const large = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) => (args[0] === 'shell' ? { stdout: 'x' } : undefined)),
+    });
+    large.ctx.config.limits.maxOutputBytes = 1024 * 1024;
+    const largeClient = await connect(large);
+    await largeClient.callTool({ name: 'dumpsys_query', arguments: { service: 'activity' } });
+    expect(large.runner.calls[1]?.options.maxBytes).toBe(64 * 1024);
+
+    const small = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) => (args[0] === 'shell' ? { stdout: 'x' } : undefined)),
+    });
+    const smallClient = await connect(small);
+    await smallClient.callTool({ name: 'dumpsys_query', arguments: { service: 'window' } });
+    expect(small.runner.calls[1]?.options.maxBytes).toBe(small.config.limits.maxOutputBytes);
+  });
+});
+
 describe('wireless TCP/IP tools', () => {
   it('connects to a host:port without resolving a device serial', async () => {
     const harness = createHarness({
@@ -771,7 +984,7 @@ describe('wireless TCP/IP tools', () => {
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain('[COMMAND_FAILED]');
     expect(textOf(result)).toContain('Connection refused');
-    // Android 11+ needs pairing first; the hint points at the planned pairing tool.
+    // Android 11+ needs pairing first; the hint points at wireless_pair.
     expect(textOf(result)).toContain('wireless_pair');
   });
 
@@ -833,6 +1046,100 @@ describe('wireless TCP/IP tools', () => {
     const client = await connect(harness);
     const result = await client.callTool({ name: 'disconnect', arguments: { address: '192.168.1.42:70000' } });
     expect(result.isError).toBe(true);
+    expect(harness.runner.calls).toEqual([]);
+  });
+});
+
+describe('wireless pairing', () => {
+  it('pairs with a host:pair_port and code without resolving a device', async () => {
+    const harness = createHarness({
+      handler: (args) =>
+        args[0] === 'pair'
+          ? { stdout: 'Successfully paired to 192.168.1.42:37421 [guid=adb-emulator-5554]' }
+          : undefined,
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({
+      name: 'wireless_pair',
+      arguments: { host: '192.168.1.42', pair_port: 37421, code: '123456' },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('Successfully paired');
+    // pair is host-level: no `adb devices` lookup and no `-s` scoping.
+    expect(harness.runner.calls.map((call) => call.args)).toEqual([
+      ['pair', '192.168.1.42:37421', '123456'],
+    ]);
+    expect(harness.runner.calls[0]?.options.serial).toBeUndefined();
+  });
+
+  it('accepts a hyphenated pairing code and strips the hyphen', async () => {
+    const harness = createHarness({
+      handler: (args) =>
+        args[0] === 'pair' ? { stdout: 'Successfully paired to 192.168.1.42:37421' } : undefined,
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({
+      name: 'wireless_pair',
+      arguments: { host: '192.168.1.42', pair_port: 37421, code: '123-456' },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(harness.runner.calls[0]?.args).toEqual(['pair', '192.168.1.42:37421', '123456']);
+  });
+
+  it('treats "Failed to pair" output as an error even though adb exits 0', async () => {
+    const harness = createHarness({
+      handler: (args) =>
+        args[0] === 'pair'
+          ? { stdout: 'Failed to pair to 192.168.1.42:37421: incorrect pairing code', exitCode: 0 }
+          : undefined,
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({
+      name: 'wireless_pair',
+      arguments: { host: '192.168.1.42', pair_port: 37421, code: '123456' },
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[COMMAND_FAILED]');
+    expect(textOf(result)).toContain('incorrect pairing code');
+    expect(textOf(result)).toContain('expire');
+  });
+
+  it('reports a non-zero pair exit code even without failure prose', async () => {
+    const harness = createHarness({
+      handler: (args) => (args[0] === 'pair' ? { stdout: '', stderr: '', exitCode: 1 } : undefined),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({
+      name: 'wireless_pair',
+      arguments: { host: '192.168.1.42', pair_port: 37421, code: '123456' },
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[COMMAND_FAILED]');
+  });
+
+  it('rejects malformed codes, hosts and ports before spawning adb', async () => {
+    const harness = createHarness();
+    const client = await connect(harness);
+    const badCodes = ['12345', '1234567', '12-345', '123-45', 'abcdef', '', '123-456-789'];
+    for (const code of badCodes) {
+      const result = await client.callTool({
+        name: 'wireless_pair',
+        arguments: { host: '192.168.1.42', pair_port: 37421, code },
+      });
+      expect(result.isError, `code "${code}"`).toBe(true);
+    }
+    const badHost = await client.callTool({
+      name: 'wireless_pair',
+      arguments: { host: 'bad host', pair_port: 37421, code: '123456' },
+    });
+    expect(badHost.isError).toBe(true);
+    for (const pair_port of [0, 70000, 1.5]) {
+      const result = await client.callTool({
+        name: 'wireless_pair',
+        arguments: { host: '192.168.1.42', pair_port, code: '123456' },
+      });
+      expect(result.isError, `port ${pair_port}`).toBe(true);
+    }
     expect(harness.runner.calls).toEqual([]);
   });
 });

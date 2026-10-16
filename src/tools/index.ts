@@ -4,8 +4,10 @@ import type { ServerContext } from '../context.js';
 import { registerListDevicesTool } from '../devices.js';
 import { registerAppTools } from './app.js';
 import { registerDeviceInfoTool } from './device-info.js';
+import { registerDumpsysTool } from './dumpsys.js';
 import { registerFileTools } from './files.js';
 import { registerForwardTools } from './forward.js';
+import { registerInputTools } from './input.js';
 import { registerLogcatTools } from './logcat.js';
 import { registerPackageTools } from './packages.js';
 import { registerScreenshotTool } from './screenshot.js';
@@ -14,7 +16,7 @@ import { registerShellTool } from './shell.js';
 import { registerUiTools } from './ui.js';
 import { registerWirelessTools } from './wireless.js';
 
-/** Registers the tool surface: the MVP (design §4.1) plus v2.0 items 1–3 (design §4.2). */
+/** Registers the tool surface: the MVP (design §4.1) plus v2.0 items 1–6 (design §4.2). */
 export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerListDevicesTool(server, ctx);
   registerDeviceInfoTool(server, ctx);
@@ -27,5 +29,7 @@ export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerWirelessTools(server, ctx);
   registerAppTools(server, ctx);
   registerUiTools(server, ctx);
+  registerInputTools(server, ctx);
+  registerDumpsysTool(server, ctx);
   registerServerTools(server, ctx);
 }

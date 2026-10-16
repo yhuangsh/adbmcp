@@ -148,7 +148,7 @@ MCP client (Claude/Cursor/Pi)
 4. **Annotation semantics still evolving (risk):** the annotation vocabulary is under active SEP discussion; hosts apply hints inconsistently [16]. Treat annotations as advisory, keep server-side guardrails authoritative.
 5. **Security surface of `shell` (risk):** arbitrary command execution is the product's power and its biggest liability. *Open question: ship `shell` in MVP with guardrails, or defer?*
 6. **Spec version targeting (open):** the spec moves fast (2025-03-26 → 2025-06-18 → 2025-11-25 → 2026-07-28 [15]); pin to the current stable spec supported by the chosen SDK release line, and track SDK v1→v2 migration [13].
-7. **Windows support (risk):** path handling, subprocess spawning, and signal semantics differ; most existing servers are POSIX-first [4]. MVP targets macOS/Linux, Windows best-effort.
+7. **Windows support (risk — MEASURED, resolved):** path handling, subprocess spawning, and signal semantics differ; most existing servers are POSIX-first [4]. CI matrix (ubuntu/macos/windows × node 20/22) passes on all platforms since v0.2.1; the only POSIX-only test construct (shebang fake-adb script) is win32-skipped with cross-platform coverage retained.
 
 ## 9. Sources
 

@@ -27,7 +27,7 @@ binary.
 npx -y adbmcp
 
 # from a checkout
-git clone <repo> && cd adbmcp
+git clone https://github.com/yhuangsh/adbmcp.git git clone <repo> && cd adbmcpgit clone <repo> && cd adbmcp cd adbmcp
 npm install
 npm run build
 node dist/index.js        # speaks MCP on stdin/stdout

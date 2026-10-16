@@ -3,6 +3,24 @@
   "version": "0.2.0",
   "description": "MCP server exposing the Android Debug Bridge (adb) as tools, resources and prompts.",
   "license": "MIT",
+  "author": "Yong Huang",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yhuangsh/adbmcp.git"
+  },
+  "homepage": "https://github.com/yhuangsh/adbmcp#readme",
+  "bugs": "https://github.com/yhuangsh/adbmcp/issues",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "adb",
+    "android",
+    "android-debug-bridge",
+    "ai",
+    "agent",
+    "claude",
+    "tooling"
+  ],
   "type": "module",
   "engines": {
     "node": ">=20"

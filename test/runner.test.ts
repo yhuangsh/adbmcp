@@ -63,7 +63,10 @@ describe('AdbRunner', () => {
     expect(existsSync(marker)).toBe(false);
   });
 
-  it('prepends -s <serial> for scoped calls and leaves devices -l unscoped', async () => {
+  it('prepends -s <serial> for scoped calls and leaves devices -l unscoped', { skip: process.platform === 'win32' }, async () => {
+    // The fake adb is a shebang script; Windows cannot spawn it without a shell.
+    // argv shaping is platform-independent string logic; spawn mechanics are
+    // covered cross-platform by the timeout and ENOENT tests.
     const runner = new AdbRunner({ adbPath: createFakeAdb() });
 
     const unscoped = await runner.run(['devices', '-l']);

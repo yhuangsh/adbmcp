@@ -73,6 +73,11 @@ Naming: snake_case, verb-first, `adb_` prefix avoided except where it aids clari
 
 Also in MVP: **Prompts** — a small set of prompt templates (`debug_crash`, `install_and_launch`, `capture_bug_report`) that orchestrate the tools above. **Resources** — `adb://devices` (live device list) so clients can subscribe to device state.
 
+#### Post-v1 tool additions (v0.6.0)
+
+- `launch_package` — resolve a package's launcher activity (`cmd package resolve-activity --brief -c android.intent.category.LAUNCHER`) and start it (`am start -n`, `-W` when `wait`), returning the component so callers can graduate to `start_activity`. Failures stay `COMMAND_FAILED` with hints (no new top-level causes); the typed alternative to `monkey -p <pkg> 1` through `shell` (issue #1).
+- `get_ui_hierarchy` `to_file` — additive option that writes `uiautomator dump` output to `/data/local/tmp/adbmcp-ui-<timestamp>.xml` and returns `{path, bytes}`, so large dumps can be pulled as structurally valid XML instead of head+tail-spliced inline text. Inline behavior is unchanged; dumps accumulate at that prefix until the consumer removes them (issue #2).
+
 ### 4.2 Later (v2) — REVISED after oracle pressure-test
 
 **v0.1.1 first (hygiene, outranks all features):** npm publish, GitHub remote, CI matrix (ubuntu/macOS/windows — Windows is currently *unmeasured*, not best-effort), README polish.

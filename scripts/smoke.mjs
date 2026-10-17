@@ -2,8 +2,10 @@
 /**
  * Live smoke test for adbmcp against a real device.
  * Drives the built server (dist/index.js) over stdio with the official MCP SDK client.
- * State-restoring: install→uninstall round-trip, pushed files cleaned up, forwards/reverses removed.
- * Input injection is exercised only through pre-spawn rejections — no live taps/swipes/typing/key events.
+ * State-restoring: install→uninstall round-trip, pushed files cleaned up, UI to_file dumps removed,
+ * forwards/reverses removed.
+ * Input injection is exercised only through pre-spawn rejections — the single live key event is HOME,
+ * used to restore the foreground after the launch_package check.
  *
  * Expects ADBMCP_CLEAR_ALLOWED_PACKAGES to not list the throwaway package used for the
  * clear_app_data refusal check (any normal allowlist satisfies this).
@@ -36,7 +38,7 @@ console.log('connected to adbmcp over stdio\n');
 
 // --- 1. tool/prompt/resource discovery -------------------------------------
 const tools = await client.listTools();
-check('tools/list returns 34 tools', tools.tools.length === 34, `got ${tools.tools.length}`);
+check('tools/list returns 35 tools', tools.tools.length === 35, `got ${tools.tools.length}`);
 const prompts = await client.listPrompts();
 check('prompts/list returns 3 prompts', prompts.prompts.length === 3, `got ${prompts.prompts.length}`);
 const res = await client.readResource({ uri: 'adb://devices' });
@@ -129,6 +131,41 @@ if (img?.data) {
 const ui = await client.callTool({ name: 'get_ui_hierarchy', arguments: { device: serial } });
 check('get_ui_hierarchy returns XML', !isErr(ui) && text(ui).includes('<?xml'), text(ui).slice(0, 90).replace(/\n/g, ' '));
 
+// Portable to_file dump: pull it back, verify balance, then delete the device copy.
+const uiFileResult = await client.callTool({ name: 'get_ui_hierarchy', arguments: { to_file: true, device: serial } });
+let uiDump = {};
+try { uiDump = JSON.parse(text(uiFileResult).split('\n')[0]); } catch {}
+const uiDumpOk =
+  !isErr(uiFileResult) &&
+  typeof uiDump.path === 'string' &&
+  uiDump.path.startsWith('/data/local/tmp/adbmcp-ui-') &&
+  Number.isInteger(uiDump.bytes) &&
+  uiDump.bytes > 0;
+check('get_ui_hierarchy to_file returns {path, bytes}', uiDumpOk, text(uiFileResult).slice(0, 150).replace(/\n/g, ' '));
+if (uiDumpOk) {
+  const localUi = join(ART, `ui-dump-${Date.now()}.xml`);
+  const pulledUi = await client.callTool({
+    name: 'pull_file',
+    arguments: { remote_path: uiDump.path, local_path: localUi, overwrite: true, device: serial },
+  });
+  check('pull_file retrieves the to_file dump', !isErr(pulledUi) && existsSync(localUi), text(pulledUi).slice(0, 120).replace(/\n/g, ' '));
+  let uiXml = '';
+  try { uiXml = readFileSync(localUi, 'utf8').trim(); } catch {}
+  check(
+    'to_file dump is structurally balanced XML',
+    (uiXml.startsWith('<hierarchy') || uiXml.startsWith('<?xml')) && uiXml.endsWith('</hierarchy>'),
+    `${uiDump.bytes} bytes, ${uiXml.length} chars`,
+  );
+  const rmUi = await client.callTool({ name: 'shell', arguments: { command: `rm ${uiDump.path}`, device: serial } });
+  check('shell rm removes the to_file dump', !isErr(rmUi) && !text(rmUi).includes('exit_code'), text(rmUi).slice(0, 100).replace(/\n/g, ' '));
+  const uiGone = await client.callTool({ name: 'shell', arguments: { command: `ls ${uiDump.path}`, device: serial } });
+  check(
+    'to_file dump is gone from the device',
+    !isErr(uiGone) && /no such file|exit_code/i.test(text(uiGone)),
+    text(uiGone).slice(0, 120).replace(/\n/g, ' '),
+  );
+}
+
 // --- 8. port forward + reverse lifecycle (state-restoring even on failure) ---
 let forwardActive = false;
 let reverseActive = false;
@@ -187,7 +224,7 @@ check(
 );
 
 // --- 10. v0.3.0 non-invasive checks (read-only dumpsys + pre-spawn rejections) --
-// No live taps/swipes/typing/key events: the device is the user's personal phone.
+// No live taps/swipes/typing; the only key event is the HOME restore after launch_package.
 const dump = await client.callTool({ name: 'dumpsys_query', arguments: { service: 'battery', device: serial } });
 check('dumpsys_query battery (read-only)', !isErr(dump) && text(dump).trim().length > 0, text(dump).split('\n')[0].slice(0, 90));
 const badTap = await client.callTool({ name: 'tap', arguments: { x: -1, y: 10, device: serial } });
@@ -215,6 +252,22 @@ const badDisc = await client.callTool({ name: 'disconnect', arguments: { address
 check('disconnect of unknown address reports failure prose', isErr(badDisc) && /no such device|not an active/i.test(text(badDisc)), text(badDisc).slice(0, 140).replace(/\n/g, ' '));
 const after = !isErr(await client.callTool({ name: 'list_devices', arguments: {} }));
 check('failed disconnect left the USB device intact', before && after);
+
+// --- 10c. v0.6.0 launch_package (launches Settings, restores with HOME) -----
+// The only live launch in the smoke: com.android.settings is safe, and HOME puts
+// the user's previous foreground app back without tapping anything.
+const launched = await client.callTool({
+  name: 'launch_package',
+  arguments: { package: 'com.android.settings', wait: true, device: serial },
+});
+const launchedText = text(launched);
+check(
+  'launch_package com.android.settings resolves and launches its component',
+  !isErr(launched) && launchedText.includes('com.android.settings'),
+  launchedText.slice(0, 160).replace(/\n/g, ' '),
+);
+const home = await client.callTool({ name: 'key_event', arguments: { key: 'HOME', device: serial } });
+check('key_event HOME restores the foreground after launch_package', !isErr(home), text(home).slice(0, 80).replace(/\n/g, ' '));
 
 // --- 11. cleanup + shutdown hygiene -----------------------------------------
 const cleanup = await client.callTool({ name: 'shell', arguments: { command: 'rm -r /data/local/tmp/adbmcp-smoke', device: serial } });
@@ -305,7 +358,7 @@ try {
 
   const httpTools = await httpRpc(httpUrl, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, sessionId);
   const httpToolList = httpTools.body.result?.tools;
-  check('HTTP tools/list returns 34 tools', Array.isArray(httpToolList) && httpToolList.length === 34, `got ${Array.isArray(httpToolList) ? httpToolList.length : 'no tools array'}`);
+  check('HTTP tools/list returns 35 tools', Array.isArray(httpToolList) && httpToolList.length === 35, `got ${Array.isArray(httpToolList) ? httpToolList.length : 'no tools array'}`);
 
   const httpDevices = await httpRpc(
     httpUrl,

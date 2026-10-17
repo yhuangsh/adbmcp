@@ -16,7 +16,10 @@ import { registerShellTool } from './shell.js';
 import { registerUiTools } from './ui.js';
 import { registerWirelessTools } from './wireless.js';
 
-/** Registers the tool surface: the MVP (design §4.1) plus v2.0 items 1–6 (design §4.2). */
+/**
+ * Registers the tool surface: the MVP (design §4.1), v2.0 items 1–6 (design §4.2), plus the
+ * v0.6.0 additions (`launch_package`, `get_ui_hierarchy` `to_file`).
+ */
 export function registerTools(server: McpServer, ctx: ServerContext): void {
   registerListDevicesTool(server, ctx);
   registerDeviceInfoTool(server, ctx);

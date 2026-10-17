@@ -204,8 +204,9 @@ Annotation columns: **RO** = `readOnlyHint`, **D** = `destructiveHint`, **I** = 
 | `disconnect` | `adb disconnect [host:port]`; no address disconnects every TCP/IP device | — | — | ✅ | ✅ |
 | `wireless_pair` | `adb pair host:pair_port code` — Android 11+ pairing, step one of connect | — | — | ✅ | ✅ |
 | `start_activity` | `am start` by component or action, `wait` for `-W` | — | — | — | — |
+| `launch_package` | Resolve a package's LAUNCHER activity, then `am start -n`; returns the component, `wait` for `-W` | — | — | — | — |
 | `force_stop_app` | `am force-stop` | — | — | ✅ | — |
-| `get_ui_hierarchy` | `uiautomator dump` XML with bounds/ids/text | ✅ | — | ✅ | — |
+| `get_ui_hierarchy` | `uiautomator dump` XML with bounds/ids/text; `to_file` dumps to `/data/local/tmp` and returns `{path, bytes}` for `pull_file` | ✅ | — | ✅ | — |
 | `tap` | `input tap x y` — tap a screen coordinate (device pixels) | — | — | — | — |
 | `swipe` | `input swipe x1 y1 x2 y2 [duration_ms]` — scroll or drag | — | — | — | — |
 | `type_text` | `input text` with `%s` space encoding and device-shell quoting | — | — | — | — |
@@ -295,7 +296,7 @@ src/
   adb/runner.ts       subprocess per call: -s scoping, timeouts, head+tail caps
   adb/errors.ts       typed causes mapped from adb stderr/exit codes
   streams/registry.ts long-running logcat handles + ring buffer
-  tools/              one module per tool group (34 tools, MVP + v2.0 items 1–6)
+  tools/              one module per tool group (35 tools, MVP + v2.0 items 1–6 + v0.6.0 additions)
   resources/devices.ts, prompts/index.ts
 test/                 vitest suites (fakes in test/helpers/)
 ```
@@ -311,8 +312,11 @@ hardening/polish release (no new tools): shell guardrails now also block pipe-to
 split/globbed root-deleting `rm`, address-targeted `disconnect` failures are reported as typed
 errors, and `reverse_port` rejects forward-only device-side specs pre-spawn. v0.5.0 adds Streamable
 HTTP (`/mcp`, stateful sessions, one shared device/stream context, optional bearer auth, loopback
-binding guard, DNS-rebinding protection). Not implemented: `screenrecord`, `bugreport`, iOS,
-emulator lifecycle management. Windows is best-effort (POSIX-first, like most of the ecosystem).
+binding guard, DNS-rebinding protection). v0.6.0 adds `launch_package` (resolve a package's launcher
+activity and start it, returning the component) and `get_ui_hierarchy` `to_file` (keep large dumps
+on-device as `{path, bytes}` for `pull_file` instead of returning structurally truncated inline XML).
+Not implemented: `screenrecord`, `bugreport`, iOS, emulator lifecycle management. Windows is
+best-effort (POSIX-first, like most of the ecosystem).
 
 ## Contributing
 

@@ -169,7 +169,7 @@ function rawPostWithHost(url: string, host: string, body: string): Promise<numbe
 }
 
 describe('HTTP transport sessions', () => {
-  it('initializes a session, lists 34 tools and calls list_devices over HTTP', async () => {
+  it('initializes a session, lists 35 tools and calls list_devices over HTTP', async () => {
     const harness = makeHarness();
     const server = await start(harness);
 
@@ -178,7 +178,7 @@ describe('HTTP transport sessions', () => {
 
     const tools = await postRpc(server.url, { jsonrpc: '2.0', id: nextRequestId++, method: 'tools/list', params: {} }, { sessionId: first.sessionId });
     expect(tools.status).toBe(200);
-    expect(toolsOf(tools)).toHaveLength(34);
+    expect(toolsOf(tools)).toHaveLength(35);
 
     const devices = await callTool(server.url, first.sessionId, 'list_devices', {});
     expect(devices.status).toBe(200);
@@ -199,7 +199,7 @@ describe('HTTP transport sessions', () => {
         { jsonrpc: '2.0', id: nextRequestId++, method: 'tools/list', params: {} },
         { sessionId },
       );
-      expect(toolsOf(tools)).toHaveLength(34);
+      expect(toolsOf(tools)).toHaveLength(35);
     }
 
     const deleted = await fetch(server.url, {
@@ -222,7 +222,7 @@ describe('HTTP transport sessions', () => {
       { sessionId: second.sessionId },
     );
     expect(stillAlive.status).toBe(200);
-    expect(toolsOf(stillAlive)).toHaveLength(34);
+    expect(toolsOf(stillAlive)).toHaveLength(35);
   });
 
   it('shares device and stream context across sessions (one device host)', async () => {

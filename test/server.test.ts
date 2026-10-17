@@ -11,6 +11,7 @@ import {
   createHarness,
   devicesHandler,
   ONE_DEVICE_LONG,
+  TWO_DEVICES_LONG,
   type TestHarness,
 } from './helpers/fakes.js';
 
@@ -43,6 +44,7 @@ const EXPECTED_TOOLS = [
   'disconnect',
   'wireless_pair',
   'start_activity',
+  'launch_package',
   'force_stop_app',
   'tap',
   'swipe',
@@ -144,6 +146,13 @@ describe('tool surface', () => {
     expect(byName.get('wireless_pair')?.annotations?.destructiveHint).toBe(false);
     expect(byName.get('wireless_pair')?.annotations?.idempotentHint).toBe(true);
     expect(byName.get('wireless_pair')?.annotations?.openWorldHint).toBe(true);
+
+    // v0.6.0 addition: launch_package is a plain stateful action, never read-only
+    // and never destructive; repeating it re-launches (or foregrounds the app).
+    expect(byName.get('launch_package')?.annotations?.readOnlyHint).toBe(false);
+    expect(byName.get('launch_package')?.annotations?.destructiveHint).toBe(false);
+    expect(byName.get('launch_package')?.annotations?.idempotentHint).toBe(false);
+    expect(byName.get('launch_package')?.annotations?.openWorldHint).toBe(false);
   });
 });
 
@@ -653,6 +662,209 @@ describe('app and ui tools', () => {
     expect(textOf(result)).toContain('component');
   });
 
+  it('resolves the launcher from the --brief header and launches it by component', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) => {
+        if (args[0] !== 'shell') return undefined;
+        const command = args[1] ?? '';
+        if (command.startsWith('cmd package resolve-activity')) {
+          return {
+            stdout:
+              'priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\n' +
+              'com.android.settings/.Settings\n',
+          };
+        }
+        if (command.startsWith('am start')) {
+          return { stdout: 'Starting: Intent { cmp=com.android.settings/.Settings }' };
+        }
+        return undefined;
+      }),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'launch_package', arguments: { package: 'com.android.settings' } });
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('com.android.settings/.Settings');
+    expect(textOf(result)).toContain('Starting: Intent');
+    expect(harness.runner.calls[1]?.args).toEqual([
+      'shell',
+      'cmd package resolve-activity --brief -c android.intent.category.LAUNCHER com.android.settings',
+    ]);
+    expect(harness.runner.calls[1]?.options.serial).toBe('emulator-5554');
+    expect(harness.runner.calls[2]?.args).toEqual(['shell', 'am start -n com.android.settings/.Settings']);
+    expect(harness.runner.calls[2]?.options.serial).toBe('emulator-5554');
+  });
+
+  it('quotes inner-class components and scans past vendor chatter when resolving', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) => {
+        if (args[0] !== 'shell') return undefined;
+        const command = args[1] ?? '';
+        if (command.startsWith('cmd package resolve-activity')) {
+          return {
+            stdout: 'Some vendor warning about resolve\nmore prose\ncom.example.app/.Outer$Inner\n',
+          };
+        }
+        if (command.startsWith('am start')) return { stdout: 'Starting: Intent { cmp=com.example.app/.Outer$Inner }' };
+        return undefined;
+      }),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'launch_package', arguments: { package: 'com.example.app' } });
+    expect(result.isError).toBeFalsy();
+    // The device-derived component contains `$` (inner class), forcing device-shell quoting.
+    expect(harness.runner.calls[2]?.args).toEqual(['shell', "am start -n 'com.example.app/.Outer$Inner'"]);
+  });
+
+  it('treats am start exit-0 with Error prose as a failure', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) => {
+        if (args[0] !== 'shell') return undefined;
+        const command = args[1] ?? '';
+        if (command.startsWith('cmd package resolve-activity')) return { stdout: 'com.example.app/.MainActivity' };
+        if (command.startsWith('am start')) return { stdout: 'Error: Activity not started, unable to resolve Intent', exitCode: 0 };
+        return undefined;
+      }),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'launch_package', arguments: { package: 'com.example.app' } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('Error:');
+  });
+
+  it('passes -W when wait is true and surfaces the launch status output', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) => {
+        if (args[0] !== 'shell') return undefined;
+        const command = args[1] ?? '';
+        if (command.startsWith('cmd package resolve-activity')) {
+          return { stdout: 'com.example.app/.MainActivity' };
+        }
+        if (command.startsWith('am start')) {
+          return { stdout: 'Status: ok\nLaunchState: COLD\nActivity: com.example.app/.MainActivity' };
+        }
+        return undefined;
+      }),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({
+      name: 'launch_package',
+      arguments: { package: 'com.example.app', wait: true },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('Status: ok');
+    expect(textOf(result)).toContain('LaunchState: COLD');
+    expect(harness.runner.calls[2]?.args).toEqual(['shell', 'am start -W -n com.example.app/.MainActivity']);
+  });
+
+  it('fails with MULTIPLE_DEVICES before resolving when no device is chosen', async () => {
+    const harness = createHarness({ handler: devicesHandler(TWO_DEVICES_LONG) });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'launch_package', arguments: { package: 'com.example.app' } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[MULTIPLE_DEVICES]');
+    expect(textOf(result)).toContain('emulator-5554');
+    expect(harness.runner.commands().some((command) => command.startsWith('shell'))).toBe(false);
+  });
+
+  it('parses headerless components and treats blank, empty and not-found resolution output as COMMAND_FAILED', async () => {
+    const shapes: Array<{ label: string; stdout: string; stderr?: string; exitCode?: number; component?: string }> = [
+      {
+        label: 'header + component',
+        stdout: 'priority=0 preferredOrder=0 match=0x108000 specificIndex=-1 isDefault=true\ncom.example.app/.MainActivity\n',
+        component: 'com.example.app/.MainActivity',
+      },
+      {
+        label: 'component only',
+        stdout: 'com.example.app/com.example.app.MainActivity\n',
+        component: 'com.example.app/com.example.app.MainActivity',
+      },
+      { label: 'not found prose', stdout: 'No activity found\n' },
+      { label: 'not found on stderr', stdout: '', stderr: 'No activity found\n' },
+      { label: 'blank output', stdout: '\n\n' },
+      { label: 'empty output', stdout: '' },
+      { label: 'non-zero exit', stdout: 'Error: package service unavailable', exitCode: 1 },
+    ];
+    for (const shape of shapes) {
+      const harness = createHarness({
+        handler: devicesHandler(ONE_DEVICE_LONG, (args) => {
+          if (args[0] !== 'shell') return undefined;
+          const command = args[1] ?? '';
+          if (command.startsWith('cmd package resolve-activity')) {
+            return {
+              stdout: shape.stdout,
+              ...(shape.stderr !== undefined ? { stderr: shape.stderr } : {}),
+              ...(shape.exitCode !== undefined ? { exitCode: shape.exitCode } : {}),
+            };
+          }
+          if (command.startsWith('am start')) return { stdout: 'Starting: Intent' };
+          return undefined;
+        }),
+      });
+      const client = await connect(harness);
+      const result = await client.callTool({ name: 'launch_package', arguments: { package: 'com.example.app' } });
+      if (shape.component) {
+        expect(result.isError, shape.label).toBeFalsy();
+        expect(textOf(result), shape.label).toContain(shape.component);
+        expect(harness.runner.commands(), shape.label).toContain(`shell am start -n ${shape.component}`);
+      } else {
+        expect(result.isError, shape.label).toBe(true);
+        expect(textOf(result), shape.label).toContain('[COMMAND_FAILED]');
+        expect(textOf(result), shape.label).toContain('list_packages');
+        expect(textOf(result), shape.label).toContain('no LAUNCHER activity');
+        expect(
+          harness.runner.commands().some((command) => command.startsWith('shell am start')),
+          shape.label,
+        ).toBe(false);
+      }
+    }
+  });
+
+  it('shell-quotes the package id in the resolve-activity command', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) => {
+        if (args[0] !== 'shell') return undefined;
+        return (args[1] ?? '').startsWith('cmd package resolve-activity')
+          ? { stdout: 'com.example.app/.MainActivity' }
+          : { stdout: 'Starting: Intent' };
+      }),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({
+      name: 'launch_package',
+      arguments: { package: 'com.example.app; echo pwned' },
+    });
+    expect(result.isError).toBeFalsy();
+    expect(harness.runner.calls[1]?.args).toEqual([
+      'shell',
+      "cmd package resolve-activity --brief -c android.intent.category.LAUNCHER 'com.example.app; echo pwned'",
+    ]);
+  });
+
+  it('maps an am start failure after a successful resolution to COMMAND_FAILED', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) => {
+        if (args[0] !== 'shell') return undefined;
+        const command = args[1] ?? '';
+        if (command.startsWith('cmd package resolve-activity')) {
+          return { stdout: 'com.example.app/.MainActivity' };
+        }
+        if (command.startsWith('am start')) {
+          return {
+            stdout: 'Error: Activity class {com.example.app/.MainActivity} does not exist.',
+            exitCode: 1,
+          };
+        }
+        return undefined;
+      }),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'launch_package', arguments: { package: 'com.example.app' } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[COMMAND_FAILED]');
+    expect(textOf(result)).toContain('does not exist');
+    expect(textOf(result)).toContain('start_activity');
+  });
+
   it('dumps the UI hierarchy via uiautomator + exec-out cat', async () => {
     const harness = createHarness({
       handler: devicesHandler(ONE_DEVICE_LONG, (args) =>
@@ -665,7 +877,136 @@ describe('app and ui tools', () => {
     const result = await client.callTool({ name: 'get_ui_hierarchy', arguments: {} });
     expect(result.isError).toBeFalsy();
     expect(textOf(result)).toContain('<node text="OK"/>');
-    expect(harness.runner.commands()).toContain('shell uiautomator dump /sdcard/window_dump.xml');
+    // The inline path is unchanged: fixed dump file, then exec-out cat, no to_file side effects.
+    expect(harness.runner.calls[1]?.args).toEqual(['shell', 'uiautomator', 'dump', '/sdcard/window_dump.xml']);
+    expect(harness.runner.calls[2]?.args).toEqual(['exec-out', 'cat', '/sdcard/window_dump.xml']);
+    expect(harness.runner.commands().some((command) => command.includes('adbmcp-ui-'))).toBe(false);
+  });
+
+  it('dumps to a timestamped device file and returns {path, bytes} for pull_file', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) => {
+        if (args[0] !== 'shell') return undefined;
+        const command = args[1] ?? '';
+        if (command.startsWith('uiautomator dump ')) {
+          return { stdout: `UI hierchary dumped to: ${command.slice('uiautomator dump '.length)}` };
+        }
+        if (command.startsWith('wc -c ')) {
+          return { stdout: `33896 ${command.slice('wc -c '.length)}` };
+        }
+        return undefined;
+      }),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'get_ui_hierarchy', arguments: { to_file: true } });
+    expect(result.isError).toBeFalsy();
+    const payload = JSON.parse(textOf(result).split('\n')[0] ?? '{}') as { path: string; bytes: number };
+    expect(payload.path).toMatch(/^\/data\/local\/tmp\/adbmcp-ui-\d+-\d+\.xml$/);
+    expect(payload.bytes).toBe(33896);
+    expect(textOf(result)).toContain('pull_file');
+    expect(textOf(result)).toContain(`rm ${payload.path}`);
+    expect(harness.runner.calls[1]?.args).toEqual(['shell', `uiautomator dump ${payload.path}`]);
+    expect(harness.runner.calls[1]?.options.serial).toBe('emulator-5554');
+    expect(harness.runner.calls[2]?.args).toEqual(['shell', `wc -c ${payload.path}`]);
+    expect(harness.runner.calls[2]?.options.serial).toBe('emulator-5554');
+  });
+
+  it('produces distinct to_file paths across sequential calls (shared-context collision guard)', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) => {
+        if (args[0] !== 'shell') return undefined;
+        const command = args[1] ?? '';
+        if (command.startsWith('uiautomator dump ')) {
+          return { stdout: `UI hierchary dumped to: ${command.slice('uiautomator dump '.length)}` };
+        }
+        if (command.startsWith('wc -c ')) return { stdout: `7 ${command.slice('wc -c '.length)}` };
+        return undefined;
+      }),
+    });
+    const client = await connect(harness);
+    const first = JSON.parse(textOf(await client.callTool({ name: 'get_ui_hierarchy', arguments: { to_file: true } })).split('\n')[0] ?? '{}') as { path: string };
+    const second = JSON.parse(textOf(await client.callTool({ name: 'get_ui_hierarchy', arguments: { to_file: true } })).split('\n')[0] ?? '{}') as { path: string };
+    expect(first.path).not.toBe(second.path);
+  });
+
+  it('accepts toybox-padded wc output and dump prose on stderr only', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) => {
+        if (args[0] !== 'shell') return undefined;
+        const command = args[1] ?? '';
+        if (command.startsWith('uiautomator dump ')) {
+          return { stderr: `UI hierchary dumped to: ${command.slice('uiautomator dump '.length)}` };
+        }
+        if (command.startsWith('wc -c ')) return { stdout: `      33896 ${command.slice('wc -c '.length)}` };
+        return undefined;
+      }),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'get_ui_hierarchy', arguments: { to_file: true } });
+    expect(result.isError).toBeFalsy();
+    const payload = JSON.parse(textOf(result).split('\n')[0] ?? '{}') as { bytes: number };
+    expect(payload.bytes).toBe(33896);
+  });
+
+  it('accepts corrected and quiet dump output and trusts wc for the byte count', async () => {
+    for (const dumpStdout of ['UI hierarchy dumped to: /path', '']) {
+      const harness = createHarness({
+        handler: devicesHandler(ONE_DEVICE_LONG, (args) => {
+          if (args[0] !== 'shell') return undefined;
+          const command = args[1] ?? '';
+          if (command.startsWith('uiautomator dump ')) return { stdout: dumpStdout };
+          if (command.startsWith('wc -c ')) return { stdout: `12 ${command.slice('wc -c '.length)}` };
+          return undefined;
+        }),
+      });
+      const client = await connect(harness);
+      const result = await client.callTool({ name: 'get_ui_hierarchy', arguments: { to_file: true } });
+      expect(result.isError, JSON.stringify(dumpStdout)).toBeFalsy();
+      const payload = JSON.parse(textOf(result).split('\n')[0] ?? '{}') as { bytes: number };
+      expect(payload.bytes, JSON.stringify(dumpStdout)).toBe(12);
+    }
+  });
+
+  it('rejects malformed dump output as COMMAND_FAILED without running wc', async () => {
+    for (const dumpStdout of ['ERROR: could not get idle state.', 'unexpected uiautomator chatter']) {
+      const harness = createHarness({
+        handler: devicesHandler(ONE_DEVICE_LONG, (args) => {
+          if (args[0] !== 'shell') return undefined;
+          const command = args[1] ?? '';
+          if (command.startsWith('uiautomator dump ')) return { stdout: dumpStdout };
+          return undefined;
+        }),
+      });
+      const client = await connect(harness);
+      const result = await client.callTool({ name: 'get_ui_hierarchy', arguments: { to_file: true } });
+      expect(result.isError, dumpStdout).toBe(true);
+      expect(textOf(result), dumpStdout).toContain('[COMMAND_FAILED]');
+      expect(textOf(result), dumpStdout).toContain(dumpStdout);
+      expect(
+        harness.runner.commands().some((command) => command.includes('wc -c')),
+        dumpStdout,
+      ).toBe(false);
+    }
+  });
+
+  it('rejects a zero-byte or unparsable wc result', async () => {
+    for (const wcStdout of ['0 /path', 'not-a-number /path']) {
+      const harness = createHarness({
+        handler: devicesHandler(ONE_DEVICE_LONG, (args) => {
+          if (args[0] !== 'shell') return undefined;
+          const command = args[1] ?? '';
+          if (command.startsWith('uiautomator dump ')) {
+            return { stdout: `UI hierchary dumped to: ${command.slice('uiautomator dump '.length)}` };
+          }
+          if (command.startsWith('wc -c ')) return { stdout: wcStdout };
+          return undefined;
+        }),
+      });
+      const client = await connect(harness);
+      const result = await client.callTool({ name: 'get_ui_hierarchy', arguments: { to_file: true } });
+      expect(result.isError, wcStdout).toBe(true);
+      expect(textOf(result), wcStdout).toContain('[COMMAND_FAILED]');
+    }
   });
 
   it('restarts the adb server and reports the device list', async () => {

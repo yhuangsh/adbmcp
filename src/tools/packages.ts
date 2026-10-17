@@ -43,7 +43,7 @@ function permissionCommandError(operation: string, output: string, exitCode: num
       operation,
       output,
       exitCode,
-      'Only debuggable apps accept pm grant/revoke. Install a debug build (android:debuggable="true", e.g. the debug variant) and retry.',
+      'Some ROMs restrict pm grant/revoke to debuggable apps; stock Android usually accepts runtime permissions for any app. Install a debug build (android:debuggable="true", e.g. the debug variant) and retry.',
     );
   }
   if (/bad argument/i.test(output)) {
@@ -207,7 +207,7 @@ export function registerPackageTools(server: McpServer, ctx: ServerContext): voi
     {
       title: 'Grant a runtime permission',
       description:
-        'Grant a runtime permission to an app (`pm grant <package> <permission>`). Destructive: it changes the permissions the app holds; revoke_permission reverses it. Only changeable runtime permissions work, and the target app is normally expected to be debuggable.',
+        'Grant a runtime permission to an app (`pm grant <package> <permission>`). Destructive: it changes the permissions the app holds; revoke_permission reverses it. Only changeable runtime permissions work; on stock Android these can be granted to non-debuggable apps too, though some restricted permissions still reject the shell.',
       inputSchema: {
         package: z.string().min(1).describe('Package name, e.g. "com.example.app".'),
         permission: z.string().min(1).describe('Permission name, e.g. "android.permission.CAMERA".'),

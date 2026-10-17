@@ -12,10 +12,32 @@ const DEVICE_ARG = z
 /** adb forward spec prefixes, see `adb forward --help`. */
 const PORT_SPEC = /^(tcp|localabstract|localreserved|localfilesystem|dev|jdwp|vsock|acceptfd)(:|$)/;
 
+/**
+ * `adb reverse` listens on the device side with only the local* and tcp specs;
+ * dev:, jdwp:, vsock: and acceptfd: are forward-only and adb rejects them.
+ */
+const REVERSE_REMOTE_SPEC = /^(tcp|localabstract|localreserved|localfilesystem)(:|$)/;
+const FORWARD_ONLY_SPEC = /^(dev|jdwp|vsock|acceptfd)(:|$)/;
+
 function assertPortSpec(value: string, name: string): void {
   if (!PORT_SPEC.test(value)) {
     throw new Error(
       `${name}="${value}" is not a valid adb port spec. Use a spec such as "tcp:8080", "localabstract:name", "jdwp:1234" or "dev:/dev/block/…".`,
+    );
+  }
+}
+
+function assertReverseRemoteSpec(value: string, tool: 'reverse_port' | 'remove_reverse'): void {
+  if (FORWARD_ONLY_SPEC.test(value)) {
+    const forwardOnlyNote =
+      tool === 'reverse_port' ? ' Use "forward_port" for the forward-only specs.' : ' It cannot have been created as a reverse, so there is nothing to remove.';
+    throw new Error(
+      `remote="${value}" is a forward-only adb spec: dev:, jdwp:, vsock: and acceptfd: cannot listen on the device for adb reverse. Use "tcp:<port>", "localabstract:<name>", "localreserved:<name>" or "localfilesystem:<name>".${forwardOnlyNote}`,
+    );
+  }
+  if (!REVERSE_REMOTE_SPEC.test(value)) {
+    throw new Error(
+      `remote="${value}" is not a valid adb reverse remote spec. Use "tcp:<port>", "localabstract:<name>", "localreserved:<name>" or "localfilesystem:<name>".`,
     );
   }
 }
@@ -159,7 +181,7 @@ export function registerForwardTools(server: McpServer, ctx: ServerContext): voi
     },
     async (args) =>
       await guard(async () => {
-        assertPortSpec(args.remote, 'remote');
+        assertReverseRemoteSpec(args.remote, 'reverse_port');
         assertPortSpec(args.local, 'local');
         const serial = await ctx.devices.resolve(args.device);
         const argv = ['reverse'];
@@ -191,7 +213,7 @@ export function registerForwardTools(server: McpServer, ctx: ServerContext): voi
     },
     async (args) =>
       await guard(async () => {
-        assertPortSpec(args.remote, 'remote');
+        assertReverseRemoteSpec(args.remote, 'remove_reverse');
         const serial = await ctx.devices.resolve(args.device);
         await ctx.runner.runChecked(['reverse', '--remove', args.remote], {
           serial,

@@ -21,6 +21,13 @@ const CONNECT_FAILURE =
 /** adb pair also prints failure prose on exit 0, e.g. "Failed to pair to …". */
 const PAIR_FAILURE = /(?:failed|unable)\s+to\s+pair|\berror\b/i;
 
+/**
+ * `adb disconnect <addr>` prints "error: no such device '<addr>'" when the
+ * target is not an active TCP/IP transport. Keep the sniff narrow: success
+ * output is only "disconnected <addr>" or "disconnected everything".
+ */
+const DISCONNECT_FAILURE = /no such device\b/i;
+
 function assertHost(value: string): void {
   if (!HOST.test(value.trim())) {
     throw new Error(
@@ -62,7 +69,7 @@ export function registerWirelessTools(server: McpServer, ctx: ServerContext): vo
     {
       title: 'Connect to a device over TCP/IP',
       description:
-        'Connect adb to a device over TCP/IP (`adb connect <host>:<port>`), e.g. "192.168.1.42:5555"; a successful connect adds the device to list_devices. Not device-scoped: the address selects the device, and no serial exists until the connection is established. On Android 10+ enable Wireless debugging on the device first; on Android 11+ that also needs a one-time pairing first — call wireless_pair with the code from the Wireless debugging screen, then connect to the port shown there (the pairing port and this connect port are different).',
+        'Connect adb to a device over TCP/IP (`adb connect <host>:<port>`), e.g. "192.168.1.42:5555"; a successful connect adds the device to list_devices. Not device-scoped: the address selects the device, and no serial exists until the connection is established. IPv6 literals (e.g. "[::1]:5555") and a bare host without :port are not accepted; specify host:port explicitly. On Android 10+ enable Wireless debugging on the device first; on Android 11+ that also needs a one-time pairing first — call wireless_pair with the code from the Wireless debugging screen, then connect to the port shown there (the pairing port and this connect port are different).',
       inputSchema: {
         address: z
           .string()
@@ -126,7 +133,7 @@ export function registerWirelessTools(server: McpServer, ctx: ServerContext): vo
       await guard(async () => {
         if (args.address !== undefined) assertHostPort(args.address);
         const address = args.address?.trim();
-        const result = await ctx.runner.runChecked(
+        const result = await ctx.runner.run(
           address !== undefined ? ['disconnect', address] : ['disconnect'],
           {
             operation: 'disconnect',
@@ -134,6 +141,21 @@ export function registerWirelessTools(server: McpServer, ctx: ServerContext): vo
             maxBytes: ctx.config.limits.maxOutputBytes,
           },
         );
+        const combined = `${result.stdout}\n${result.stderr}`.trim();
+        // Some adb builds exit 0 for a failed address-targeted disconnect, so
+        // sniff the prose before treating the command as successful.
+        if (address !== undefined && DISCONNECT_FAILURE.test(combined)) {
+          throw new AdbError({
+            cause: 'COMMAND_FAILED',
+            message: `adb disconnect ${address} failed: ${combined.split('\n')[0] ?? combined}`,
+            hint: 'That address is not an active TCP/IP connection. Check list_devices for connected serials, verify host:port, or omit the address to disconnect every TCP/IP device.',
+            stderr: result.stderr,
+            exitCode: result.exitCode,
+          });
+        }
+        if (result.exitCode !== 0) {
+          throw mapAdbFailure(result, { operation: 'disconnect' });
+        }
         const output = result.stdout.trim();
         if (output.length > 0) return textResult(output);
         return textResult(

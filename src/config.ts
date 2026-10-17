@@ -7,13 +7,28 @@
 
 export const DEFAULT_SHELL_BLOCKED_PATTERNS: readonly string[] = [
   // Guardrail, not a sandbox: it stops accidents and obvious misuse (reboot, root
-  // escalation, filesystem destruction) without forking the server. A deliberately
-  // evasive command can still get through — pair it with ADBMCP_SHELL_ALLOWED_PREFIXES.
+  // escalation, piped-in shell scripts, filesystem destruction) without forking the
+  // server. A deliberately evasive command can still get through — pair it with
+  // ADBMCP_SHELL_ALLOWED_PREFIXES.
   // Reboot / power state changes.
   '(?:^|[;&|])\\s*reboot(?:\\s|$)',
   // Recursive force delete of the filesystem root.
   '\\brm\\s+-[a-z]*r[a-z]*f[a-z]*\\s+/+(?:\\s|$)',
   '\\brm\\s+-[a-z]*f[a-z]*r[a-z]*\\s+/+(?:\\s|$)',
+  // Root deletion split across flags, reordered, or with a glob: rm -r -f /,
+  // rm -f -r /, rm -rf /*. Kept separate from the two patterns above because a
+  // glob after the root defeats their end anchor.
+  '\\brm\\s+(?:-[A-Za-z-]+\\s+)+/+\\*?(?=\\s|$|[;&|)`])',
+  // Piping downloaded or generated content into a shell: curl … | sh, … | sudo -E bash.
+  // Matches sh/bash/mksh/dash (mksh is the actual Android shell binary). Two forms:
+  // - spaced pipe (the realistic pipe-into-shell shape): full separator-aware lookahead
+  //   excludes descriptor names (shasum, shellcheck) and quoted grep alternation
+  //   such as grep -E 'sh|bash|zsh' or grep -E '(sh|bash)'.
+  // - unspaced pipe (curl|sh): end-of-token lookahead only, so quoted alternations keep
+  //   working; residual loss: unspaced `curl|sh;` and `$(curl|sh)` pass.
+  // Textual matching caveat: patterns see the raw command text, including inside quotes.
+  '\\|\\s+(?:(?:sudo|su)\\s+(?:-\\S+\\s+)*)?(?:ba|mk|da)?sh\\b(?=\\s|$|[;&|)`])',
+  '\\|(?:(?:sudo|su)\\s+(?:-\\S+\\s+)*)?(?:ba|mk|da)?sh\\b(?=\\s|$)',
   // Privilege escalation; adbmcp never escalates on its own (design §6).
   '(?:^|[;&|])\\s*su(?:\\s|$)',
   '(?:^|[;&|])\\s*mkfs',
@@ -153,7 +168,7 @@ export function assertShellCommandAllowed(command: string, policy: ShellPolicy):
     if (pattern.test(trimmed)) {
       throw new GuardrailError(
         'shell.blocked',
-        `Command refused by adbmcp shell guardrail (matched /${source}/). Reboot, privilege escalation and filesystem-destroying commands are blocked by default; a maintainer can override them with ADBMCP_SHELL_BLOCKED_PATTERNS.`,
+        `Command refused by adbmcp shell guardrail (matched /${source}/). Reboot, privilege escalation, pipe-to-shell and filesystem-destroying commands are blocked by default; this is a guardrail, not a sandbox, and a maintainer can override it with ADBMCP_SHELL_BLOCKED_PATTERNS.`,
       );
     }
   }

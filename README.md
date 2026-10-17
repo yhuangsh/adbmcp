@@ -134,7 +134,7 @@ reads and confirm writes.
 | --- | --- | --- |
 | `ADB_PATH` | `adb` (from `PATH`) | Path to the adb binary. Must match the version of any running adb server. |
 | `ADBMCP_ALLOWED_DEVICES` | unset (all allowed) | Comma-separated serial allowlist. Operations on other serials are refused. |
-| `ADBMCP_SHELL_BLOCKED_PATTERNS` | `reboot`, `su`, `rm -rf /`, `mkfs`, `wipe` | Comma-separated JavaScript regex sources tested against the whole `shell` command. Overriding **replaces** the defaults. |
+| `ADBMCP_SHELL_BLOCKED_PATTERNS` | `reboot`, `su`, `mkfs`, `wipe`, `rm` of `/` (split/reordered flags and `/*` included), pipelines into `sh`/`bash` | Comma-separated JavaScript regex sources tested against the whole `shell` command. Overriding **replaces** the defaults. |
 | `ADBMCP_SHELL_ALLOWED_PREFIXES` | unset (no prefix restriction) | When set, a `shell` command must start with one of these comma-separated prefixes. |
 | `ADBMCP_PUSH_ALLOWED_ROOTS` | `/sdcard`, `/storage/emulated/0`, `/data/local/tmp` | Remote roots `push_file` may write to. |
 | `ADBMCP_CLEAR_ALLOWED_PACKAGES` | unset (refuse every clear) | Comma-separated package allowlist for `clear_app_data`. There is no allow-all mode: unset or empty refuses every clear. |
@@ -149,7 +149,13 @@ reads and confirm writes.
   push roots, and the pull overwrite check.
 - **`shell` is arbitrary code execution on the device.** It is annotated as not read-only and
   open-world, blocklisted by default, and documented as the escape hatch — keep `shell` disabled or
-  prefix-restricted (`ADBMCP_SHELL_ALLOWED_PREFIXES`) on shared or CI machines.
+  prefix-restricted (`ADBMCP_SHELL_ALLOWED_PREFIXES`) on shared or CI machines. The default blocklist
+  covers reboot/power-state changes, `su`, `mkfs`, `wipe`, `rm` of `/` (including split/reordered
+  flags and the `/*` glob), and pipelines into `sh`/`bash` such as `curl … | sh` or `… | sudo bash`.
+  This is a guardrail, not a sandbox: a deliberately obfuscated command can still get through. A
+  pattern-based guardrail: matching runs on the raw command text, including inside quotes, so even
+  prose like `echo "use curl | sh to install"` is refused — precision always yields to safety here.
+  maintainer can replace the patterns with `ADBMCP_SHELL_BLOCKED_PATTERNS`.
 - **`uninstall_package` deletes app data** unless `keep_data: true`. **`clear_app_data` deletes app
   data permanently** and is refused unless the package is listed in `ADBMCP_CLEAR_ALLOWED_PACKAGES`
   (unset/empty refuses every clear). **`grant_permission` / `revoke_permission`** change an app's
@@ -199,6 +205,8 @@ Implements the MVP plus v2.0 items 1–6 from the design (§4.2): reverse port f
 forward/reverse listings, `pm grant`/`revoke` plus allowlist-gated `clear_app_data`, wireless
 TCP/IP `connect`/`disconnect`/`wireless_pair`, first-class input injection (`tap`, `swipe`,
 `type_text`, `key_event` — typed schemas that fix the `input text` quoting footgun, no DSL), and the
-curated `dumpsys_query`. Not implemented: `screenrecord`, `bugreport`, Streamable HTTP transport,
-iOS, emulator lifecycle management. Windows is best-effort (POSIX-first, like most of the
-ecosystem).
+curated `dumpsys_query`. v0.4.0 is a hardening/polish release (no new tools): shell guardrails now
+also block pipe-to-shell payloads and split/globbed root-deleting `rm`, address-targeted `disconnect`
+failures are reported as typed errors, and `reverse_port` rejects forward-only device-side specs
+pre-spawn. Not implemented: `screenrecord`, `bugreport`, Streamable HTTP transport, iOS, emulator
+lifecycle management. Windows is best-effort (POSIX-first, like most of the ecosystem).

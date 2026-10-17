@@ -19,7 +19,7 @@ export function registerShellTool(server: McpServer, ctx: ServerContext): void {
     {
       title: 'Run a device shell command',
       description:
-        'Escape hatch: run an arbitrary command through `adb shell` on one device and return stdout/stderr. Powerful but not read-only — destructive commands are refused by default (reboot, su, rm -rf /, mkfs, wipe). Prefer the dedicated tools (list_packages, install_apk, get_ui_hierarchy, …) when they cover the job. A non-zero remote exit code is reported as `exit_code: N` in the output. If the call times out, only the host-side adb client is killed; the command keeps running on the device (inherent to adb).',
+        'Escape hatch: run an arbitrary command through `adb shell` on one device and return stdout/stderr. Powerful but not read-only — destructive commands are refused by default (reboot, su, mkfs, wipe, rm of / including split/reordered flags and the /* glob, and pipelines into sh/bash such as `curl … | sh` or `… | sudo bash`). This is a guardrail, not a sandbox: a deliberately obfuscated command can still get through. Prefer the dedicated tools (list_packages, install_apk, get_ui_hierarchy, …) when they cover the job. A non-zero remote exit code is reported as `exit_code: N` in the output. If the call times out, only the host-side adb client is killed; the command keeps running on the device (inherent to adb).',
       inputSchema: {
         command: z.string().min(1).describe('Device shell command, e.g. "dumpsys battery" or "ls /sdcard/Download".'),
         device: z.string().optional().describe('Device serial from list_devices; optional when exactly one device is connected.'),

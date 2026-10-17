@@ -357,6 +357,23 @@ describe('package tools', () => {
     expect(textOf(result)).toContain('pm list permissions');
   });
 
+  it('explains an Unknown permission failure from pm revoke too', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) =>
+        args[0] === 'shell' ? { stdout: 'Unknown permission: android.permission.BOGUS', exitCode: 1 } : undefined,
+      ),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({
+      name: 'revoke_permission',
+      arguments: { package: 'com.example.app', permission: 'android.permission.BOGUS' },
+    });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[COMMAND_FAILED]');
+    expect(textOf(result)).toContain('Unknown permission');
+    expect(textOf(result)).toContain('pm list permissions');
+  });
+
   it('explains a not-a-debuggable-app failure from pm', async () => {
     const harness = createHarness({
       handler: devicesHandler(ONE_DEVICE_LONG, (args) =>
@@ -740,6 +757,20 @@ describe('app and ui tools', () => {
     expect(harness.runner.calls[3]?.options.serial).toBe('emulator-5554');
   });
 
+  it('parses the 2-token forward list form that omits the serial', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) =>
+        args[0] === 'forward' && args[1] === '--list' ? { stdout: 'tcp:8080 tcp:8080\n' } : undefined,
+      ),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'list_forwards', arguments: {} });
+    expect(result.isError).toBeFalsy();
+    expect(JSON.parse(textOf(result))).toEqual([
+      { serial: 'emulator-5554', local: 'tcp:8080', remote: 'tcp:8080' },
+    ]);
+  });
+
   it('returns an empty JSON list when nothing is forwarded or reversed', async () => {
     const client = await connect(createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) }));
     const forwards = await client.callTool({ name: 'list_forwards', arguments: {} });
@@ -750,7 +781,7 @@ describe('app and ui tools', () => {
     expect(JSON.parse(textOf(reverses))).toEqual([]);
   });
 
-  it('rejects a malformed reverse spec and an unknown serial before touching the device', async () => {
+  it('rejects malformed remote/local reverse specs and an unknown serial before touching the device', async () => {
     const malformed = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
     const client = await connect(malformed);
     const bad = await client.callTool({
@@ -760,6 +791,13 @@ describe('app and ui tools', () => {
     expect(bad.isError).toBe(true);
     expect(malformed.runner.calls).toEqual([]);
 
+    const badLocal = await client.callTool({
+      name: 'reverse_port',
+      arguments: { remote: 'tcp:18900', local: '18901' },
+    });
+    expect(badLocal.isError).toBe(true);
+    expect(malformed.runner.calls).toEqual([]);
+
     const unknownDevice = await connect(createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) }));
     const missing = await unknownDevice.callTool({
       name: 'reverse_port',
@@ -767,6 +805,37 @@ describe('app and ui tools', () => {
     });
     expect(missing.isError).toBe(true);
     expect(textOf(missing)).toContain('[NO_DEVICE]');
+  });
+
+  it('rejects forward-only specs on the reverse device side and still accepts local* specs', async () => {
+    const harness = createHarness({ handler: devicesHandler(ONE_DEVICE_LONG) });
+    const client = await connect(harness);
+    for (const remote of ['jdwp:1234', 'dev:/dev/block/sda1', 'vsock:2:5555', 'acceptfd:3']) {
+      const result = await client.callTool({
+        name: 'reverse_port',
+        arguments: { remote, local: 'tcp:18901' },
+      });
+      expect(result.isError, remote).toBe(true);
+      expect(textOf(result), remote).toContain('forward-only');
+      expect(textOf(result), remote).toContain('forward_port');
+    }
+    for (const remote of ['jdwp:1234', 'dev:/dev/block/sda1', 'vsock:2:5555', 'acceptfd:3']) {
+      const result = await client.callTool({ name: 'remove_reverse', arguments: { remote } });
+      expect(result.isError, remote).toBe(true);
+      expect(textOf(result), remote).toContain('forward-only');
+    }
+    expect(harness.runner.calls).toEqual([]);
+
+    const accepted = await client.callTool({
+      name: 'reverse_port',
+      arguments: { remote: 'localabstract:webview_devtools_remote', local: 'tcp:18901' },
+    });
+    expect(accepted.isError).toBeFalsy();
+    expect(harness.runner.calls.at(-1)?.args).toEqual([
+      'reverse',
+      'localabstract:webview_devtools_remote',
+      'tcp:18901',
+    ]);
   });
 });
 
@@ -1018,6 +1087,16 @@ describe('wireless TCP/IP tools', () => {
     expect(harness.runner.calls).toEqual([]);
   });
 
+  it('trims whitespace around a connect address before validating and spawning adb', async () => {
+    const harness = createHarness({
+      handler: (args) => (args[0] === 'connect' ? { stdout: 'connected to 192.168.1.42:5555' } : undefined),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'connect', arguments: { address: '  192.168.1.42:5555  ' } });
+    expect(result.isError).toBeFalsy();
+    expect(harness.runner.calls.map((call) => call.args)).toEqual([['connect', '192.168.1.42:5555']]);
+  });
+
   it('disconnects one address or every TCP/IP device', async () => {
     const harness = createHarness({
       handler: (args) =>
@@ -1039,6 +1118,35 @@ describe('wireless TCP/IP tools', () => {
       ['disconnect', '192.168.1.42:5555'],
       ['disconnect'],
     ]);
+  });
+
+  it('sniffs "no such device" prose from an address-targeted disconnect even when adb exits 0', async () => {
+    const harness = createHarness({
+      handler: (args) =>
+        args[0] === 'disconnect'
+          ? { stderr: "error: no such device '192.168.1.42:5555'", exitCode: 0 }
+          : undefined,
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'disconnect', arguments: { address: '192.168.1.42:5555' } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[COMMAND_FAILED]');
+    expect(textOf(result)).toContain('no such device');
+    expect(textOf(result)).toContain('not an active TCP/IP connection');
+  });
+
+  it('reports the adb 34 exit-1 disconnect shape with the same actionable hint', async () => {
+    const harness = createHarness({
+      handler: (args) =>
+        args[0] === 'disconnect'
+          ? { stderr: "error: no such device '192.168.1.42:5555'", exitCode: 1 }
+          : undefined,
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'disconnect', arguments: { address: '192.168.1.42:5555' } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[COMMAND_FAILED]');
+    expect(textOf(result)).toContain('not an active TCP/IP connection');
   });
 
   it('rejects a malformed disconnect address before spawning adb', async () => {

@@ -12,7 +12,7 @@
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
@@ -226,6 +226,162 @@ await new Promise((r) => setTimeout(r, 800));
 let leftover = '';
 try { leftover = execFileSync('pgrep', ['-fa', 'logcat'], { encoding: 'utf8' }); } catch {}
 check('no leftover logcat processes after shutdown', !/adb .*logcat|logcat/i.test(leftover), leftover.trim().split('\n')[0] ?? '(none)');
+
+// --- 12. Streamable HTTP transport (v0.5.0) --------------------------------
+// --port 0 lets the OS pick a free port; the server prints the real one on stderr.
+const httpEnv = { ...process.env };
+delete httpEnv.ADBMCP_HTTP_TOKEN;
+delete httpEnv.ADBMCP_HTTP_HOST;
+delete httpEnv.ADBMCP_HTTP_ALLOWED_HOSTS;
+const httpProc = spawn('node', ['dist/index.js', '--http', '--host', '127.0.0.1', '--port', '0'], {
+  cwd: process.cwd(),
+  env: httpEnv,
+  stdio: ['ignore', 'ignore', 'pipe'],
+});
+const httpExited = new Promise((resolve) => {
+  httpProc.once('exit', (code, signal) => resolve({ code, signal }));
+  httpProc.once('error', () => resolve({ code: null, signal: null }));
+});
+let httpLog = '';
+let httpUrl = null;
+const httpReady = new Promise((resolve, reject) => {
+  const timer = setTimeout(() => reject(new Error(`HTTP server did not start:\n${httpLog}`)), 8000);
+  httpProc.stderr.on('data', (chunk) => {
+    httpLog += chunk.toString();
+    const match = /HTTP transport on (http:\/\/[^\s,]+)/.exec(httpLog);
+    if (match && !httpUrl) {
+      httpUrl = match[1];
+      clearTimeout(timer);
+      resolve();
+    }
+  });
+  httpProc.once('exit', (code) => {
+    if (!httpUrl) {
+      clearTimeout(timer);
+      reject(new Error(`HTTP server exited (${code}):\n${httpLog}`));
+    }
+  });
+  httpProc.once('error', reject);
+});
+
+async function httpRpc(url, message, sessionId, extraHeaders = {}) {
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+      ...(sessionId ? { 'Mcp-Session-Id': sessionId } : {}),
+      ...extraHeaders,
+    },
+    body: JSON.stringify(message),
+  });
+  const raw = await response.text();
+  const contentType = response.headers.get('content-type') ?? '';
+  let body = {};
+  if (contentType.includes('text/event-stream')) {
+    const data = raw
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).trim())
+      .filter(Boolean);
+    body = JSON.parse(data.at(-1) ?? '{}');
+  } else if (raw.length > 0) {
+    body = JSON.parse(raw);
+  }
+  return { status: response.status, sessionId: response.headers.get('mcp-session-id'), body };
+}
+
+let sessionId = null;
+try {
+  await httpReady;
+  const init = await httpRpc(httpUrl, {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'adbmcp-smoke', version: '0.0.0' } },
+  });
+  sessionId = init.sessionId;
+  check('HTTP initialize returns a session id', init.status === 200 && Boolean(sessionId), `status ${init.status}, session ${sessionId}`);
+
+  const httpTools = await httpRpc(httpUrl, { jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }, sessionId);
+  const httpToolList = httpTools.body.result?.tools;
+  check('HTTP tools/list returns 34 tools', Array.isArray(httpToolList) && httpToolList.length === 34, `got ${Array.isArray(httpToolList) ? httpToolList.length : 'no tools array'}`);
+
+  const httpDevices = await httpRpc(
+    httpUrl,
+    { jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'list_devices', arguments: {} } },
+    sessionId,
+  );
+  const httpDevicesResult = httpDevices.body.result ?? {};
+  check('HTTP list_devices sees the real device', !isErr(httpDevicesResult) && text(httpDevicesResult).includes(serial), text(httpDevicesResult).slice(0, 120).replace(/\n/g, ' '));
+
+  if (sessionId) {
+    const deleted = await fetch(httpUrl, { method: 'DELETE', headers: { 'Mcp-Session-Id': sessionId } });
+    check('HTTP DELETE closes the session', deleted.status === 200, `status ${deleted.status}`);
+    const stale = await httpRpc(httpUrl, { jsonrpc: '2.0', id: 4, method: 'tools/list', params: {} }, sessionId);
+    check('HTTP request after DELETE is a typed session error', stale.status === 404 && stale.body.error?.code === -32001, `status ${stale.status}, code ${stale.body.error?.code}`);
+  }
+} catch (error) {
+  check('HTTP transport smoke completed', false, error instanceof Error ? error.message : String(error));
+} finally {
+  httpProc.kill('SIGTERM');
+  const { code } = await httpExited;
+  check('HTTP server exits cleanly on SIGTERM', code === 0, `exit ${code}`);
+}
+
+// --- 12b. HTTP bearer auth (v0.5.0): token required, scheme case-insensitive
+const TOKEN = `smoke-token-${Date.now()}`;
+const authEnv = { ...httpEnv, ADBMCP_HTTP_TOKEN: TOKEN };
+const authProc = spawn('node', ['dist/index.js', '--http', '--host', '127.0.0.1', '--port', '0'], {
+  cwd: process.cwd(),
+  env: authEnv,
+  stdio: ['ignore', 'ignore', 'pipe'],
+});
+const authExited = new Promise((resolve) => {
+  authProc.once('exit', (code, signal) => resolve({ code, signal }));
+  authProc.once('error', () => resolve({ code: null, signal: null }));
+});
+let authUrl = null;
+const authReady = new Promise((resolve, reject) => {
+  let log = '';
+  const timer = setTimeout(() => reject(new Error(`auth HTTP server did not start:\n${log}`)), 8000);
+  authProc.stderr.on('data', (chunk) => {
+    log += chunk.toString();
+    const match = /HTTP transport on (http:\/\/[^\s,]+)/.exec(log);
+    if (match && !authUrl) {
+      authUrl = match[1];
+      clearTimeout(timer);
+      resolve();
+    }
+  });
+  authProc.once('exit', (code) => {
+    if (!authUrl) {
+      clearTimeout(timer);
+      reject(new Error(`auth HTTP server exited (${code}):\n${log}`));
+    }
+  });
+});
+try {
+  await authReady;
+  const initMessage = {
+    jsonrpc: '2.0',
+    id: 1,
+    method: 'initialize',
+    params: { protocolVersion: '2025-11-25', capabilities: {}, clientInfo: { name: 'adbmcp-smoke', version: '0.0.0' } },
+  };
+  const noAuth = await httpRpc(authUrl, initMessage);
+  check('HTTP auth: missing token is 401 before MCP handling', noAuth.status === 401 && !noAuth.sessionId, `status ${noAuth.status}`);
+  const lowerAuth = await httpRpc(authUrl, initMessage, null, { Authorization: `bearer ${TOKEN}` });
+  check('HTTP auth: lowercase bearer scheme accepted (RFC 7235)', lowerAuth.status === 200 && Boolean(lowerAuth.sessionId), `status ${lowerAuth.status}`);
+  const wrongAuth = await httpRpc(authUrl, initMessage, null, { Authorization: `Bearer wrong-token` });
+  check('HTTP auth: wrong token is 401', wrongAuth.status === 401, `status ${wrongAuth.status}`);
+} catch (error) {
+  check('HTTP auth smoke completed', false, error instanceof Error ? error.message : String(error));
+} finally {
+  authProc.kill('SIGTERM');
+  const { code } = await authExited;
+  check('auth HTTP server exits cleanly on SIGTERM', code === 0, `exit ${code}`);
+}
 
 console.log(`\n==== SMOKE RESULT: ${pass} passed, ${fail} failed ====`);
 process.exit(fail > 0 ? 1 : 0);

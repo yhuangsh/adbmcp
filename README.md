@@ -18,9 +18,10 @@ Wi-Fi. It is a thin, predictable wrapper around the official
   `TIMEOUT`, `COMMAND_FAILED`) with a hint for the next step.
 - **Safety by construction** — full MCP annotations on every tool plus server-side guardrails that
   are enforced even if a host ignores annotations.
-- **stdio transport** — the client launches `adbmcp` as a subprocess, the normal MCP deployment.
+- **stdio by default, Streamable HTTP optional** — the client launches `adbmcp` as a subprocess;
+  `--http` serves the same tools over `/mcp` for shared-device-host deployments.
 
-Implements the MVP plus v2.0 items 1–6 in [`docs/design/product-design-v0.md`](docs/design/product-design-v0.md).
+Implements the MVP plus v2.0 items 1–7 in [`docs/design/product-design-v0.md`](docs/design/product-design-v0.md).
 
 ## Install
 
@@ -70,8 +71,103 @@ node dist/index.js        # speaks MCP on stdin/stdout
 }
 ```
 
-Other clients work the same way: a `command` plus `args`, with `ADB_PATH` / `ADBMCP_*` environment
-variables passed through. Diagnostics are written to **stderr**; stdout carries MCP traffic only.
+Other stdio clients work the same way: a `command` plus `args`, with `ADB_PATH` / `ADBMCP_*`
+environment variables passed through. In stdio mode, stdout carries MCP protocol traffic only;
+diagnostics go to **stderr**.
+
+### Streamable HTTP (shared device host)
+
+Use HTTP when several agents or MCP clients should share one machine's adb server, devices and
+allowlist — an emulator farm, a lab phone, or a remote desktop — instead of each client launching its
+own subprocess. stdio stays the default: with no flags, `adbmcp` speaks MCP on stdin/stdout.
+
+```bash
+node dist/index.js --http                                    # http://127.0.0.1:3331/mcp
+ADBMCP_HTTP_TOKEN=secret node dist/index.js --http --host 0.0.0.0 --port 8080
+```
+
+| Flag / variable | Default | Meaning |
+| --- | --- | --- |
+| `--http` | off | Enable the Streamable HTTP transport. Without it the server is stdio-only. |
+| `--port`, `ADBMCP_HTTP_PORT` | `3331` | Listen port (`--port` wins over the env var). `0` asks the OS for an ephemeral port; the real URL is logged to stderr. |
+| `--host`, `ADBMCP_HTTP_HOST` | `127.0.0.1` | Bind address (`--host` wins over the env var). |
+| `ADBMCP_HTTP_TOKEN` | unset | When set, every `/mcp` request must send `Authorization: Bearer <token>`. Unset is allowed only on a loopback host. |
+| `ADBMCP_HTTP_ALLOWED_HOSTS` | derived | Comma-separated exact `Host` header values (`host[:port]`) for DNS-rebinding protection. Overrides the derived loopback/bound-host list. |
+
+The endpoint is stateful: `initialize` creates a session, `Mcp-Session-Id` identifies it, and
+`DELETE /mcp` closes it. All sessions share one device host, one `ADBMCP_ALLOWED_DEVICES` allowlist
+and one logcat stream registry — streams started in one session can be read from another. Sessions
+are the same trust domain, **not** isolation between agents.
+
+Client config (Claude Desktop, Cursor, or any Streamable HTTP client):
+
+```json
+{
+  "mcpServers": {
+    "adb": {
+      "type": "http",
+      "url": "http://localhost:3331/mcp"
+    }
+  }
+}
+```
+
+When `ADBMCP_HTTP_TOKEN` is set, add `"headers": { "Authorization": "Bearer <token>" }` to the
+server entry (client support for header config varies).
+
+Security notes:
+
+- **Loopback by default.** Binding a non-loopback host without `ADBMCP_HTTP_TOKEN` is refused at
+  startup; the error explains the two ways forward (set a token, or bind `127.0.0.1`).
+- **Token auth is pre-MCP.** With a token configured, missing/incorrect credentials get `401` before
+  any MCP session handling; comparison is constant-time (`node:crypto` `timingSafeEqual`).
+- **DNS-rebinding protection.** The SDK transport rejects requests whose `Host` header is not the
+  bound host or a loopback alias (`localhost`, `127.0.0.1`, `::1`) on the actual port. Override with
+  `ADBMCP_HTTP_ALLOWED_HOSTS` when a reverse proxy forwards a different hostname.
+- **One device host, many agents.** `shell` is available to every session; on a shared host prefer
+  `ADBMCP_ALLOWED_DEVICES` and `ADBMCP_SHELL_ALLOWED_PREFIXES`, and put the server behind the token.
+- **No in-process TLS.** The server speaks plain HTTP; terminate TLS in a reverse proxy for
+  non-loopback deployments and set `ADBMCP_HTTP_ALLOWED_HOSTS` to the forwarded `Host` value.
+- Only `/mcp` is served; POST bodies are capped at 1 MiB (`413` above that), unsupported methods get
+  `405`, and unknown paths get `404`.
+
+### Deploying over a VPN mesh (Tailscale example)
+
+A common topology: your agent runs on a public server, and one or more device hosts (machines with
+USB-attached phones) are joined to a private mesh such as a Tailscale tailnet. Nothing needs to be
+exposed to the public internet — the agent reaches device hosts through the mesh.
+
+**Shape A — bind the mesh interface directly.** On each device host, set the token, bind to the
+mesh IP (or `0.0.0.0`), and allow the hostname the agent will dial:
+
+```bash
+ADBMCP_HTTP_TOKEN=<token> ADBMCP_HTTP_ALLOWED_HOSTS='phonehost.tailnet-name.ts.net:3331,127.0.0.1:3331,localhost:3331' \
+  adbmcp --http --host 0.0.0.0 --port 3331
+```
+
+WireGuard encrypts mesh traffic; the bearer token stays as the application-level gate so a
+misconfigured ACL or a compromised mesh member still cannot touch your devices. `ALLOWED_HOSTS` must
+contain the exact `Host` header the agent sends — MagicDNS name *and* port. Note the override
+*replaces* the derived loopback defaults, so loopback entries are re-added for local health checks.
+
+**Shape B — loopback + `tailscale serve` (nice for always-on hosts).** Keep adbmcp bound to
+`127.0.0.1` (optionally with a token still set), then let Tailscale expose it:
+
+```bash
+adbmcp --http --host 127.0.0.1 --port 3331 &
+tailscale serve --bg --https=443 http://127.0.0.1:3331   # --https=443 is the default mode
+```
+
+Keep the token set even in this shape — `tailscale serve` terminates TLS and limits reachability to
+the tailnet, but adbmcp should still authenticate its clients. Point the agent at
+`https://phonehost.tailnet-name.ts.net/mcp` (`tailscale serve` passes the original Host header
+through, so the portless `ADBMCP_HTTP_ALLOWED_HOSTS` entry is correct here).
+
+Caveats that apply to both shapes: one adbmcp node per device host (the agent configures one MCP
+server entry per host — there is no cross-host device registry); sessions live until the client
+deletes them or the process restarts, so a device host that suspends or redeploys drops its logcat
+streams and agents must re-initialize; and provision the token to the agent out-of-band (secret
+manager, not chat).
 
 ## Tools
 
@@ -141,6 +237,10 @@ reads and confirm writes.
 | `ADBMCP_TIMEOUT_MS` | `30000` | Default subprocess timeout (`timeout_ms` per call overrides it). |
 | `ADBMCP_MAX_OUTPUT_BYTES` | `65536` | Head+tail byte cap per call; the dropped middle is reported inline. |
 | `ADBMCP_LOGCAT_BUFFER_BYTES` | `1048576` | Ring-buffer cap per logcat stream; overflow is reported as `dropped_bytes`. |
+| `ADBMCP_HTTP_PORT` | `3331` | HTTP mode listen port (equivalent to `--port`; the flag wins). |
+| `ADBMCP_HTTP_HOST` | `127.0.0.1` | HTTP mode bind address (equivalent to `--host`; the flag wins). |
+| `ADBMCP_HTTP_TOKEN` | unset | Bearer token required on every `/mcp` request when set. Non-loopback binds without it are refused. |
+| `ADBMCP_HTTP_ALLOWED_HOSTS` | derived | Comma-separated exact `Host` header values accepted by DNS-rebinding protection. |
 
 ## Safety notes
 
@@ -187,7 +287,8 @@ platform-tools, a device or an emulator. Layout:
 
 ```
 src/
-  index.ts            stdio entrypoint (transport, signals)
+  index.ts            entrypoint: stdio by default, --http for Streamable HTTP
+  http.ts             HTTP sessions, bearer auth, loopback guard, DNS-rebinding allowlist
   server.ts           assembles config + runner + tools/resources/prompts
   config.ts           env config, shell/device/push/clear guardrails
   devices.ts          device parsing, resolution rule, list_devices tool
@@ -201,12 +302,14 @@ test/                 vitest suites (fakes in test/helpers/)
 
 ## Status
 
-Implements the MVP plus v2.0 items 1–6 from the design (§4.2): reverse port forwards and structured
+Implements the MVP plus v2.0 items 1–7 from the design (§4.2): reverse port forwards and structured
 forward/reverse listings, `pm grant`/`revoke` plus allowlist-gated `clear_app_data`, wireless
 TCP/IP `connect`/`disconnect`/`wireless_pair`, first-class input injection (`tap`, `swipe`,
-`type_text`, `key_event` — typed schemas that fix the `input text` quoting footgun, no DSL), and the
-curated `dumpsys_query`. v0.4.0 is a hardening/polish release (no new tools): shell guardrails now
-also block pipe-to-shell payloads and split/globbed root-deleting `rm`, address-targeted `disconnect`
-failures are reported as typed errors, and `reverse_port` rejects forward-only device-side specs
-pre-spawn. Not implemented: `screenrecord`, `bugreport`, Streamable HTTP transport, iOS, emulator
-lifecycle management. Windows is best-effort (POSIX-first, like most of the ecosystem).
+`type_text`, `key_event` — typed schemas that fix the `input text` quoting footgun, no DSL), the
+curated `dumpsys_query`, and the pulled-forward Streamable HTTP transport. v0.4.0 was a
+hardening/polish release (no new tools): shell guardrails now also block pipe-to-shell payloads and
+split/globbed root-deleting `rm`, address-targeted `disconnect` failures are reported as typed
+errors, and `reverse_port` rejects forward-only device-side specs pre-spawn. v0.5.0 adds Streamable
+HTTP (`/mcp`, stateful sessions, one shared device/stream context, optional bearer auth, loopback
+binding guard, DNS-rebinding protection). Not implemented: `screenrecord`, `bugreport`, iOS,
+emulator lifecycle management. Windows is best-effort (POSIX-first, like most of the ecosystem).

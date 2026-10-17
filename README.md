@@ -313,3 +313,9 @@ errors, and `reverse_port` rejects forward-only device-side specs pre-spawn. v0.
 HTTP (`/mcp`, stateful sessions, one shared device/stream context, optional bearer auth, loopback
 binding guard, DNS-rebinding protection). Not implemented: `screenrecord`, `bugreport`, iOS,
 emulator lifecycle management. Windows is best-effort (POSIX-first, like most of the ecosystem).
+
+## Contributing
+
+Bug reports and use-case-driven feature requests are welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for what makes a good issue, how triage works, and the
+development setup.

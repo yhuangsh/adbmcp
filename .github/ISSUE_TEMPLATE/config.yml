@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question about usage
+    url: https://github.com/yhuangsh/adbmcp/blob/main/README.md
+    about: Most setup/config questions are answered in the README (transports, guardrails, env vars)

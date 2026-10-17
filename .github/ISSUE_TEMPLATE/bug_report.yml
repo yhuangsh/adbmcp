@@ -1,0 +1,64 @@
+name: Bug report
+description: Report something that doesn't work — wrong behavior, crash, or bad output
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug. The more reproducible it is, the faster it gets fixed.
+  - type: input
+    id: version
+    attributes:
+      label: adbmcp version
+      description: Output of `npm view @yhuangsh/adbmcp version`, or the version you run
+      placeholder: e.g. 0.5.0
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Transport
+      options:
+        - stdio
+        - Streamable HTTP
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, Node version, how adb is installed, and the device (model + Android version)
+      placeholder: e.g. Debian 13, Node 22, platform-tools 34, OPPO PGBM10 / Android 15 (USB)
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: Minimal reproduction
+      description: Exact tool call(s) or commands, and what happened
+      placeholder: |
+        1. Called `screenshot` with device X
+        2. Got: ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: dropdown
+    id: severity
+    attributes:
+      label: Impact
+      options:
+        - Blocks me entirely (no workaround)
+        - Annoying but I can work around it
+        - Cosmetic / documentation
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or adb output
+      description: Server stderr, the typed error message, or raw `adb` output — paste as text

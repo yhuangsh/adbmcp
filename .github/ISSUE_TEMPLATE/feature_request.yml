@@ -1,0 +1,43 @@
+name: Feature request
+description: Propose a new tool, capability, or behavior change
+labels: ['enhancement']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Describe the problem you're trying to solve, not just the solution you imagine — the design
+        doc ([product-design-v0.md](https://github.com/yhuangsh/adbmcp/blob/main/docs/design/product-design-v0.md))
+        keeps a deferred-features ledger with trigger conditions, and your use case may match one.
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem / use case
+      description: What are you trying to do with an agent + device that you can't today?
+      placeholder: e.g. "I want an agent to record the screen while it drives a UI test"
+    validations:
+      required: true
+  - type: textarea
+    id: workaround
+    attributes:
+      label: Current workaround
+      description: Is there a way to do this today with `shell` or other tools? How clunky is it?
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - New tool / adb capability
+        - Existing tool behavior
+        - Transport / deployment (HTTP, auth, multi-host)
+        - Output / agent ergonomics
+        - Other
+    validations:
+      required: true
+  - type: checkboxes
+    id: non-goals
+    attributes:
+      label: Design-doc check
+      description: The design doc lists non-goals (§7) — UI-test frameworks, iOS, screen mirroring, adb protocol reimplementation. Does your request overlap one?
+      options:
+        - label: I checked §7 and this is not a listed non-goal
+          required: true

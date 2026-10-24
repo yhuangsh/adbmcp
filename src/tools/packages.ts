@@ -1,6 +1,6 @@
 import { existsSync } from 'node:fs';
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 import { z } from 'zod';
 
 import { AdbError } from '../adb/errors.js';

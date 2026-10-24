@@ -17,9 +17,8 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
+import { isInitializeRequest, type McpServer } from '@modelcontextprotocol/server';
 
 import type { ServerContext } from './context.js';
 import { createServer as createMcpServer } from './server.js';
@@ -219,7 +218,7 @@ function sendJsonRpcError(
 }
 
 interface HttpSession {
-  transport: StreamableHTTPServerTransport;
+  transport: NodeStreamableHTTPServerTransport;
   server: McpServer;
 }
 
@@ -263,8 +262,8 @@ export async function startHttpServer(
 
   const createSession = (): HttpSession => {
     const server = createMcpServer(ctx);
-    let transport!: StreamableHTTPServerTransport;
-    transport = new StreamableHTTPServerTransport({
+    let transport!: NodeStreamableHTTPServerTransport;
+    transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: (sessionId) => {
         sessions.set(sessionId, { transport, server });
@@ -272,6 +271,9 @@ export async function startHttpServer(
       onsessionclosed: (sessionId) => {
         sessions.delete(sessionId);
       },
+      // enableDnsRebindingProtection/allowedHosts are deprecated in SDK v2 but still
+      // enforced; swapping them for hostHeaderValidation middleware ships with the
+      // 2026-07-28 protocol-adoption work order, not this package migration.
       enableDnsRebindingProtection: true,
       allowedHosts,
       maxRequestBodySize: MAX_HTTP_BODY_BYTES,

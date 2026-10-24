@@ -1,4 +1,4 @@
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { McpServer } from '@modelcontextprotocol/server';
 
 import type { ServerContext } from '../context.js';
 import { registerListDevicesTool } from '../devices.js';

@@ -1,4 +1,4 @@
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
 
 import { isAdbError } from '../adb/errors.js';
 import { GuardrailError } from '../config.js';

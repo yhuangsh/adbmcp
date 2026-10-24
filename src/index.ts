@@ -8,7 +8,7 @@
  */
 import { parseArgs } from 'node:util';
 
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
 
 import type { HttpConfigOverrides } from './http.js';
 import { createContext, createServer, readVersion } from './server.js';

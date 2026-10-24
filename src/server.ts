@@ -5,7 +5,7 @@
  */
 import { readFileSync } from 'node:fs';
 
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { McpServer } from '@modelcontextprotocol/server';
 
 import { AdbRunner } from './adb/runner.js';
 import { loadConfig, type AdbmcpConfig } from './config.js';

@@ -1,6 +1,5 @@
 import { request as httpRequest } from 'node:http';
 
-import { LATEST_PROTOCOL_VERSION } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -82,7 +81,9 @@ function initializeMessage(): Record<string, unknown> {
     id: nextRequestId++,
     method: 'initialize',
     params: {
-      protocolVersion: LATEST_PROTOCOL_VERSION,
+      // Pinned to the 2025-era revision: this suite asserts stateful HTTP sessions
+      // (Mcp-Session-Id, DELETE semantics); adopting 2026-07-28 is a separate work order.
+      protocolVersion: '2025-11-25',
       capabilities: {},
       clientInfo: { name: 'adbmcp-http-test', version: '1.0.0' },
     },

@@ -3,3 +3,12 @@ dist/
 *.log
 .DS_Store
 .pi/
+
+# sssf runtime
+adws/
+justfile
+.env.sample
+.env
+__pycache__/
+*.pyc
+specs/

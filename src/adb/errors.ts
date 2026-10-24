@@ -13,7 +13,9 @@ export type AdbErrorCause =
   | 'MULTIPLE_DEVICES'
   | 'ADB_SERVER_CONFLICT'
   | 'TIMEOUT'
-  | 'COMMAND_FAILED';
+  | 'COMMAND_FAILED'
+  | 'IME_UNAVAILABLE'
+  | 'TEXT_NOT_ASCII';
 
 export interface AdbErrorDetails {
   cause: AdbErrorCause;
@@ -167,6 +169,29 @@ export function commandFailedError(options: {
     hint: 'Inspect the stderr excerpt; for device-side failures try running the equivalent command via the shell tool.',
     stderr: options.stderr,
     exitCode: options.exitCode,
+  });
+}
+
+/**
+ * type_text hit non-ASCII text but no broadcast-capable IME is active (issue #3).
+ * Constructed directly by the tool, never by mapAdbFailure.
+ */
+export function imeUnavailableError(activeIme: string | null): AdbError {
+  const current = activeIme ? `The active IME is "${activeIme}".` : 'No IME is currently selected.';
+  return new AdbError({
+    cause: 'IME_UNAVAILABLE',
+    message: `type_text cannot type non-ASCII text: no broadcast-capable IME is active. ${current}`,
+    hint: 'Install ADB Keyboard (com.android.adbkeyboard), enable it and select it as the active input method ("adb shell ime set com.android.adbkeyboard/.AdbIME"), then retry. adbmcp sends non-ASCII text via the ADB_INPUT_B64 broadcast that AdbIME receives.',
+  });
+}
+
+/** type_text hit non-ASCII text while the IME broadcast path is disabled (issue #3 option 2). */
+export function textNotAsciiError(): AdbError {
+  return new AdbError({
+    cause: 'TEXT_NOT_ASCII',
+    message:
+      'type_text received non-ASCII text but ADBMCP_TYPE_TEXT_NON_ASCII=reject disables the IME broadcast path; "input text" is ASCII-only.',
+    hint: 'Type ASCII only, or unset ADBMCP_TYPE_TEXT_NON_ASCII (default "ime") and make AdbIME (com.android.adbkeyboard/.AdbIME) the active IME so the ADB_INPUT_B64 broadcast path can type any script.',
   });
 }
 

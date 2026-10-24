@@ -1244,13 +1244,13 @@ describe('input injection tools', () => {
       ['a<b>c', "input text 'a<b>c'"],
       ['a\\b', "input text 'a\\b'"],
       ['star*question?~', "input text 'star*question?~'"],
-      ['héllo wörld', "input text 'héllo%swörld'"],
+      // Non-ASCII rows (héllo wörld, hi 👋) moved to the IME broadcast tests below:
+      // `input text` is ASCII-only, so they no longer go through this path (issue #3).
       ['100%', 'input text 100%'],
       ['line one\nline two', "input text 'line%sone\nline%stwo'"], // spaces→%s; newline stays literal inside quotes (keymap → ENTER)
       ['a\tb', "input text 'a\tb'"],
       ["end'", "input text 'end'\\'''"],
       ['100%s done', 'input text 100%s%sdone'],
-      ['hi 👋', "input text 'hi%s👋'"],
       ['-rf', 'input text -rf'],
     ];
     for (const [text, expected] of cases) {
@@ -1269,6 +1269,168 @@ describe('input injection tools', () => {
     const result = await client.callTool({ name: 'type_text', arguments: { text: '' } });
     expect(result.isError).toBe(true);
     expect(harness.runner.calls).toEqual([]);
+  });
+
+  it('keeps ASCII type_text on the input text fast path with no IME round trip', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) =>
+        args.join(' ').includes('settings')
+          ? { stdout: 'com.android.adbkeyboard/.AdbIME\n' }
+          : undefined,
+      ),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'type_text', arguments: { text: 'hello world' } });
+    expect(result.isError).toBeFalsy();
+    // [0] = devices -l, [1] = the single input text call — nothing else.
+    expect(harness.runner.calls).toHaveLength(2);
+    expect(harness.runner.calls[1]?.args).toEqual(['shell', 'input text hello%sworld']);
+    expect(
+      harness.runner.commands().some((command) => command.includes('settings')),
+      'ASCII text must not pay the IME-detection round trip',
+    ).toBe(false);
+  });
+
+  it('types CJK text via the ADB_INPUT_B64 broadcast when AdbIME is active (issue #3)', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) =>
+        args.join(' ') === 'shell settings get secure default_input_method'
+          ? { stdout: 'com.android.adbkeyboard/.AdbIME\n' }
+          : undefined,
+      ),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'type_text', arguments: { text: '咖啡' } });
+    expect(result.isError).toBeFalsy();
+    expect(textOf(result)).toContain('broadcast');
+    // [0] = devices -l, [1] = IME detection, [2] = the broadcast itself.
+    expect(harness.runner.calls[1]?.args).toEqual([
+      'shell',
+      'settings get secure default_input_method',
+    ]);
+    expect(harness.runner.calls[1]?.options.serial).toBe('emulator-5554');
+    expect(harness.runner.calls[2]?.args).toEqual([
+      'shell',
+      'am broadcast -a ADB_INPUT_B64 --es msg 5ZKW5ZWh', // base64('咖啡'), safe-token so unquoted
+    ]);
+    expect(harness.runner.calls[2]?.options.serial).toBe('emulator-5554');
+  });
+
+  it('broadcasts other non-ASCII scripts too (Latin accents, emoji)', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, () => ({ stdout: 'com.android.adbkeyboard/.AdbIME\n' })),
+    });
+    const client = await connect(harness);
+    const cases: Array<[string, string]> = [
+      ['héllo wörld', 'aMOpbGxvIHfDtnJsZA=='],
+      ['hi 👋', 'aGkg8J+Riw=='],
+    ];
+    for (const [text, base64] of cases) {
+      const result = await client.callTool({ name: 'type_text', arguments: { text } });
+      expect(result.isError, text).toBeFalsy();
+      expect(harness.runner.calls.at(-1)?.args, text).toEqual([
+        'shell',
+        `am broadcast -a ADB_INPUT_B64 --es msg ${base64}`,
+      ]);
+    }
+  });
+
+  it('accepts the flattened component form of the active IME', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, () => ({
+        stdout: 'com.android.adbkeyboard/com.android.adbkeyboard.AdbIME\n',
+      })),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'type_text', arguments: { text: '咖啡' } });
+    expect(result.isError).toBeFalsy();
+    expect(harness.runner.calls.at(-1)?.args).toEqual([
+      'shell',
+      'am broadcast -a ADB_INPUT_B64 --es msg 5ZKW5ZWh',
+    ]);
+  });
+
+  it('honours ADBMCP_IME_BROADCAST_COMPONENTS for a custom capable IME', async () => {
+    const harness = createHarness({
+      env: { ADBMCP_IME_BROADCAST_COMPONENTS: 'com.example.ime/.B64IME' },
+      handler: devicesHandler(ONE_DEVICE_LONG, () => ({ stdout: 'com.example.ime/.B64IME\n' })),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'type_text', arguments: { text: '咖啡' } });
+    expect(result.isError).toBeFalsy();
+    // [0] = devices -l, [1] = IME detection, [2] = the broadcast.
+    expect(harness.runner.calls).toHaveLength(3);
+    expect(harness.runner.calls[2]?.args).toEqual([
+      'shell',
+      'am broadcast -a ADB_INPUT_B64 --es msg 5ZKW5ZWh',
+    ]);
+  });
+
+  it('fails with [IME_UNAVAILABLE] when another IME is active, without broadcasting', async () => {
+    const activeIme = 'com.google.android.inputmethod.latin/com.android.inputmethod.latin.LatinIME';
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, () => ({ stdout: `${activeIme}\n` })),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'type_text', arguments: { text: '咖啡' } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[IME_UNAVAILABLE]');
+    expect(textOf(result)).toContain(activeIme);
+    expect(textOf(result)).toContain('com.android.adbkeyboard');
+    expect(textOf(result)).toContain('Hint:');
+    expect(harness.runner.commands().some((command) => command.includes('am broadcast'))).toBe(false);
+  });
+
+  it('fails with [IME_UNAVAILABLE] when no IME is selected (null or empty)', async () => {
+    for (const stdout of ['', 'null\n']) {
+      const harness = createHarness({
+        handler: devicesHandler(ONE_DEVICE_LONG, (args) =>
+          args.join(' ').includes('settings') ? { stdout } : undefined,
+        ),
+      });
+      const client = await connect(harness);
+      const result = await client.callTool({ name: 'type_text', arguments: { text: '咖啡' } });
+      expect(result.isError, JSON.stringify(stdout)).toBe(true);
+      expect(textOf(result), JSON.stringify(stdout)).toContain('[IME_UNAVAILABLE]');
+      expect(textOf(result), JSON.stringify(stdout)).toContain('No IME is currently selected.');
+      expect(harness.runner.commands().some((command) => command.includes('am broadcast'))).toBe(
+        false,
+      );
+    }
+  });
+
+  it('rejects non-ASCII text with [TEXT_NOT_ASCII] in reject mode, before any device shell call', async () => {
+    const harness = createHarness({
+      env: { ADBMCP_TYPE_TEXT_NON_ASCII: 'reject' },
+      handler: devicesHandler(ONE_DEVICE_LONG),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'type_text', arguments: { text: '咖啡' } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[TEXT_NOT_ASCII]');
+    expect(textOf(result)).toContain('ADBMCP_TYPE_TEXT_NON_ASCII');
+    // Only the devices -l listing ran: reject mode never touches the device shell.
+    expect(harness.runner.calls).toHaveLength(1);
+
+    // ASCII text is unaffected by reject mode.
+    const ascii = await client.callTool({ name: 'type_text', arguments: { text: 'ok' } });
+    expect(ascii.isError).toBeFalsy();
+    expect(harness.runner.calls.at(-1)?.args).toEqual(['shell', 'input text ok']);
+  });
+
+  it('surfaces a typed cause when the IME detection query itself fails', async () => {
+    const harness = createHarness({
+      handler: devicesHandler(ONE_DEVICE_LONG, (args) =>
+        args.join(' ').includes('settings')
+          ? { stdout: '', stderr: 'error: device offline', exitCode: 1 }
+          : undefined,
+      ),
+    });
+    const client = await connect(harness);
+    const result = await client.callTool({ name: 'type_text', arguments: { text: '咖啡' } });
+    expect(result.isError).toBe(true);
+    expect(textOf(result)).toContain('[DEVICE_OFFLINE]');
+    expect(harness.runner.commands().some((command) => command.includes('am broadcast'))).toBe(false);
   });
 
   it('maps every named key to its Android keycode', async () => {

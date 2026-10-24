@@ -43,6 +43,17 @@ export const DEFAULT_PUSH_ALLOWED_ROOTS: readonly string[] = [
 
 export const DEFAULT_LOG_TIMESTAMP_FORMAT = 'threadtime';
 
+/**
+ * Component ids of IMEs that accept the ADB_INPUT_B64 broadcast (issue #3):
+ * ADB Keyboard is the reference implementation and the default.
+ */
+export const DEFAULT_IME_BROADCAST_COMPONENTS: readonly string[] = [
+  'com.android.adbkeyboard/.AdbIME',
+];
+
+/** How type_text handles non-ASCII text (ADBMCP_TYPE_TEXT_NON_ASCII, issue #3). */
+export type NonAsciiMode = 'ime' | 'reject';
+
 export interface ShellPolicy {
   /** Regex sources; a command matching any of them is refused. */
   blockedPatterns: string[];
@@ -72,6 +83,19 @@ export interface AdbmcpConfig {
     bufferBytes: number;
     format: string;
   };
+  input: {
+    /**
+     * How type_text handles non-ASCII text (ADBMCP_TYPE_TEXT_NON_ASCII):
+     * 'ime' (default) sends the ADB_INPUT_B64 broadcast when a capable IME is
+     * active; 'reject' fails with TEXT_NOT_ASCII (issue #3 option 2).
+     */
+    nonAscii: NonAsciiMode;
+    /**
+     * Component ids of IMEs that accept the ADB_INPUT_B64 broadcast
+     * (ADBMCP_IME_BROADCAST_COMPONENTS, comma-separated).
+     */
+    imeBroadcastComponents: string[];
+  };
 }
 
 export const DEFAULTS = {
@@ -97,6 +121,13 @@ function parsePositiveInt(value: string | undefined, fallback: number, name: str
     throw new Error(`${name} must be a positive integer, received "${value}".`);
   }
   return parsed;
+}
+
+function parseNonAsciiMode(value: string | undefined): NonAsciiMode {
+  if (value === undefined || value.trim() === '') return 'ime';
+  const trimmed = value.trim();
+  if (trimmed === 'ime' || trimmed === 'reject') return trimmed;
+  throw new Error(`ADBMCP_TYPE_TEXT_NON_ASCII must be "ime" or "reject", received "${value}".`);
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): AdbmcpConfig {
@@ -131,6 +162,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AdbmcpConfig {
         'ADBMCP_LOGCAT_BUFFER_BYTES',
       ),
       format: DEFAULT_LOG_TIMESTAMP_FORMAT,
+    },
+    input: {
+      nonAscii: parseNonAsciiMode(env['ADBMCP_TYPE_TEXT_NON_ASCII']),
+      imeBroadcastComponents:
+        parseList(env['ADBMCP_IME_BROADCAST_COMPONENTS']) ?? [...DEFAULT_IME_BROADCAST_COMPONENTS],
     },
   };
 }

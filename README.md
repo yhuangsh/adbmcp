@@ -209,7 +209,7 @@ Annotation columns: **RO** = `readOnlyHint`, **D** = `destructiveHint`, **I** = 
 | `get_ui_hierarchy` | `uiautomator dump` XML with bounds/ids/text; `to_file` dumps to `/data/local/tmp` and returns `{path, bytes}` for `pull_file` | ✅ | — | ✅ | — |
 | `tap` | `input tap x y` — tap a screen coordinate (device pixels) | — | — | — | — |
 | `swipe` | `input swipe x1 y1 x2 y2 [duration_ms]` — scroll or drag | — | — | — | — |
-| `type_text` | `input text` with `%s` space encoding and device-shell quoting | — | — | — | — |
+| `type_text` | `input text` with `%s` space encoding and device-shell quoting; non-ASCII (e.g. CJK) goes through the `ADB_INPUT_B64` broadcast when a capable IME (ADB Keyboard) is active — see [Non-ASCII text input](#non-ascii-text-input) | — | — | — | — |
 | `key_event` | `input keyevent` — named key (HOME, BACK, …) or keycode 0–300 | — | — | — | — |
 | `adb_server_restart` | `kill-server` + `start-server` recovery for version conflicts | — | — | — | — |
 
@@ -225,6 +225,42 @@ Also shipped:
 `openWorldHint: true` tools. They are never merged with read-only tools, so hosts can auto-approve
 reads and confirm writes.
 
+### Non-ASCII text input
+
+Android's `input text` is ASCII-only: typing non-ASCII text (e.g. CJK) through it crashes on the
+device with a `NullPointerException` instead of typing anything (issue #3). `type_text` therefore
+has two paths:
+
+- **ASCII text** (default and unchanged) is sent as `input text` with `%s` space encoding and
+  device-shell quoting — one round trip, no extra device calls.
+- **Non-ASCII text** is sent as `am broadcast -a ADB_INPUT_B64 --es msg <base64-utf8>` to the active
+  input method. This requires a broadcast-capable IME to be the **active** IME; the reference
+  implementation is [ADB Keyboard](https://github.com/senzhk/ADBKeyBoard)
+  (`com.android.adbkeyboard/.AdbIME`). On every non-ASCII call adbmcp queries
+  `settings get secure default_input_method` (never cached) and broadcasts only when the active IME
+  matches a configured capable component.
+
+One-time setup, run from your own shell (adbmcp detects the IME but deliberately never installs or
+switches IMEs on its own):
+
+```sh
+adb install ADBKeyboard.apk                      # from the ADBKeyBoard releases
+adb shell ime enable com.android.adbkeyboard/.AdbIME
+adb shell ime set com.android.adbkeyboard/.AdbIME   # must be the ACTIVE input method
+```
+
+Failure modes, both typed and actionable instead of leaking the device-side NPE:
+
+- `[IME_UNAVAILABLE]` — the text is non-ASCII but the active IME is not broadcast-capable (or no IME
+  is selected). The message names the active IME and the hint gives the `ime enable` / `ime set`
+  commands above.
+- `[TEXT_NOT_ASCII]` — `ADBMCP_TYPE_TEXT_NON_ASCII=reject` opts out of the broadcast path, so
+  non-ASCII text is refused before any device call.
+
+IMEs other than ADB Keyboard can be declared broadcast-capable with
+`ADBMCP_IME_BROADCAST_COMPONENTS` (see the table below); both the short `pkg/.Class` form and the
+flattened `pkg/pkg.Class` form match.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -235,6 +271,8 @@ reads and confirm writes.
 | `ADBMCP_SHELL_ALLOWED_PREFIXES` | unset (no prefix restriction) | When set, a `shell` command must start with one of these comma-separated prefixes. |
 | `ADBMCP_PUSH_ALLOWED_ROOTS` | `/sdcard`, `/storage/emulated/0`, `/data/local/tmp` | Remote roots `push_file` may write to. |
 | `ADBMCP_CLEAR_ALLOWED_PACKAGES` | unset (refuse every clear) | Comma-separated package allowlist for `clear_app_data`. There is no allow-all mode: unset or empty refuses every clear. |
+| `ADBMCP_TYPE_TEXT_NON_ASCII` | `ime` | How `type_text` handles non-ASCII text (see [Non-ASCII text input](#non-ascii-text-input)): `ime` sends the `ADB_INPUT_B64` broadcast when a capable IME is active, `reject` fails with `[TEXT_NOT_ASCII]`. |
+| `ADBMCP_IME_BROADCAST_COMPONENTS` | `com.android.adbkeyboard/.AdbIME` | Comma-separated IME component ids accepted as broadcast-capable for the `ADB_INPUT_B64` path. `pkg/.Class` and flattened `pkg/pkg.Class` forms both match. |
 | `ADBMCP_TIMEOUT_MS` | `30000` | Default subprocess timeout (`timeout_ms` per call overrides it). |
 | `ADBMCP_MAX_OUTPUT_BYTES` | `65536` | Head+tail byte cap per call; the dropped middle is reported inline. |
 | `ADBMCP_LOGCAT_BUFFER_BYTES` | `1048576` | Ring-buffer cap per logcat stream; overflow is reported as `dropped_bytes`. |

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   assertClearPackageAllowed,
   assertShellCommandAllowed,
+  DEFAULT_IME_BROADCAST_COMPONENTS,
   DEFAULT_PUSH_ALLOWED_ROOTS,
   DEFAULT_SHELL_BLOCKED_PATTERNS,
   GuardrailError,
@@ -53,6 +54,32 @@ describe('loadConfig', () => {
       'com.example.dev',
     ]);
     expect(loadConfig({ ADBMCP_CLEAR_ALLOWED_PACKAGES: '   ' }).clearAllowedPackages).toEqual([]);
+  });
+
+  it('defaults the type_text non-ASCII handling to the IME broadcast path (issue #3)', () => {
+    expect(loadConfig({}).input).toEqual({
+      nonAscii: 'ime',
+      imeBroadcastComponents: [...DEFAULT_IME_BROADCAST_COMPONENTS],
+    });
+    expect(loadConfig({ ADBMCP_TYPE_TEXT_NON_ASCII: '   ' }).input.nonAscii).toBe('ime');
+    expect(loadConfig({ ADBMCP_IME_BROADCAST_COMPONENTS: '   ' }).input.imeBroadcastComponents).toEqual(
+      [...DEFAULT_IME_BROADCAST_COMPONENTS],
+    );
+  });
+
+  it('accepts ADBMCP_TYPE_TEXT_NON_ASCII=reject and rejects unknown values', () => {
+    expect(loadConfig({ ADBMCP_TYPE_TEXT_NON_ASCII: 'reject' }).input.nonAscii).toBe('reject');
+    expect(loadConfig({ ADBMCP_TYPE_TEXT_NON_ASCII: ' ime ' }).input.nonAscii).toBe('ime');
+    expect(() => loadConfig({ ADBMCP_TYPE_TEXT_NON_ASCII: 'always' })).toThrow(
+      /ADBMCP_TYPE_TEXT_NON_ASCII/,
+    );
+  });
+
+  it('parses ADBMCP_IME_BROADCAST_COMPONENTS as a comma-separated component list', () => {
+    expect(
+      loadConfig({ ADBMCP_IME_BROADCAST_COMPONENTS: 'a.b/.Ime, c.d/e.F' }).input
+        .imeBroadcastComponents,
+    ).toEqual(['a.b/.Ime', 'c.d/e.F']);
   });
 });
 

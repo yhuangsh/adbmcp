@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 
+import { imeUnavailableError, textNotAsciiError } from '../adb/errors.js';
 import type { ServerContext } from '../context.js';
 import { quoteForDeviceShell } from '../util/shell.js';
 import { guard, textResult } from './common.js';
@@ -51,6 +52,30 @@ function coordinateArg(name: string) {
  */
 function encodeInputText(text: string): string {
   return text.replaceAll(' ', '%s');
+}
+
+/** Android's `input text` is ASCII-only (issue #3); anything else needs the IME broadcast path. */
+const ASCII_ONLY = /^[\x00-\x7F]*$/;
+
+/** Broadcast action ADB Keyboard (com.android.adbkeyboard) types base64 payloads for (issue #3). */
+const ADB_IME_BROADCAST_ACTION = 'ADB_INPUT_B64';
+const ACTIVE_IME_COMMAND = 'settings get secure default_input_method';
+
+/** Normalize a component id so "pkg/.Class" and "pkg/pkg.Class" compare equal. */
+function flattenComponentId(id: string): string {
+  const slash = id.indexOf('/');
+  if (slash < 0) return id.trim();
+  const pkg = id.slice(0, slash).trim();
+  let cls = id.slice(slash + 1).trim();
+  if (cls.startsWith('.')) cls = `${pkg}${cls}`;
+  return `${pkg}/${cls}`;
+}
+
+/** True when the active IME is one of the configured broadcast-capable components. */
+function isBroadcastCapableIme(activeIme: string | null, capable: readonly string[]): boolean {
+  if (!activeIme) return false;
+  const flattened = flattenComponentId(activeIme);
+  return capable.some((candidate) => flattenComponentId(candidate) === flattened);
 }
 
 /**
@@ -143,7 +168,7 @@ export function registerInputTools(server: McpServer, ctx: ServerContext): void 
     {
       title: 'Type text',
       description:
-        'Type text into the focused input field (`input text <text>`). Spaces are encoded as %s (adb\'s space form) and shell metacharacters are quoted, so the text reaches the device intact; note that a literal "%s" in text still becomes a space on the device. Focus the field first (tap it), and screenshot to confirm what was typed.',
+        'Type text into the focused input field (`input text <text>`). Spaces are encoded as %s (adb\'s space form) and shell metacharacters are quoted, so the text reaches the device intact; note that a literal "%s" in text still becomes a space on the device. Non-ASCII text (e.g. CJK) cannot go through `input text` (ASCII-only): when a broadcast-capable IME is active — ADB Keyboard, `com.android.adbkeyboard/.AdbIME` — it is typed via the `ADB_INPUT_B64` broadcast instead. If no capable IME is active the call fails with `[IME_UNAVAILABLE]` (install/enable/select AdbIME, then retry); with `ADBMCP_TYPE_TEXT_NON_ASCII=reject` non-ASCII text fails with `[TEXT_NOT_ASCII]` instead. Focus the field first (tap it), and screenshot to confirm what was typed.',
       inputSchema: {
         text: z.string().min(1).describe('Text to type, e.g. "hello world" or "user@example.com".'),
         device: DEVICE_ARG,
@@ -158,14 +183,48 @@ export function registerInputTools(server: McpServer, ctx: ServerContext): void 
     async (args) =>
       await guard(async () => {
         const serial = await ctx.devices.resolve(args.device);
-        const command = `input text ${quoteForDeviceShell(encodeInputText(args.text))}`;
-        await ctx.runner.runChecked(['shell', command], {
+        const runOptions = {
           serial,
           operation: 'type_text',
           timeoutMs: ctx.config.limits.defaultTimeoutMs,
           maxBytes: ctx.config.limits.maxOutputBytes,
+        };
+
+        // ASCII fast path: `input text`, single round trip, unchanged behavior.
+        if (ASCII_ONLY.test(args.text)) {
+          const command = `input text ${quoteForDeviceShell(encodeInputText(args.text))}`;
+          await ctx.runner.runChecked(['shell', command], runOptions);
+          return textResult(`Typed text into the focused field on ${serial}.`);
+        }
+
+        if (ctx.config.input.nonAscii === 'reject') {
+          throw textNotAsciiError();
+        }
+
+        // IME broadcast path (issue #3 option 1): the broadcast only types when a
+        // broadcast-capable IME is the *active* input method. Query fresh on every
+        // call — the user can switch IMEs at any time, so do not cache.
+        const imeResult = await ctx.runner.runChecked(['shell', ACTIVE_IME_COMMAND], {
+          ...runOptions,
+          operation: 'type_text (detect active IME)',
         });
-        return textResult(`Typed text into the focused field on ${serial}.`);
+        const rawIme = imeResult.stdout.trim();
+        const activeIme = rawIme === '' || rawIme === 'null' ? null : rawIme;
+        if (!isBroadcastCapableIme(activeIme, ctx.config.input.imeBroadcastComponents)) {
+          throw imeUnavailableError(activeIme);
+        }
+
+        const base64 = Buffer.from(args.text, 'utf8').toString('base64');
+        await ctx.runner.runChecked(
+          [
+            'shell',
+            `am broadcast -a ${ADB_IME_BROADCAST_ACTION} --es msg ${quoteForDeviceShell(base64)}`,
+          ],
+          runOptions,
+        );
+        return textResult(
+          `Typed text into the focused field on ${serial} via the ${activeIme} broadcast.`,
+        );
       }),
   );
 

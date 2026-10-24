@@ -1,10 +1,19 @@
 /**
- * Optional Streamable HTTP transport (design §5, v0.5.0).
+ * Optional Streamable HTTP transport (design §5, v0.5.0) — dual-serve since v0.7.0.
  *
- * Stateful mode: every MCP session gets its own McpServer + StreamableHTTPServerTransport,
- * while all sessions share one ServerContext (config, runner, device manager, stream
- * registry). This is the shared-device-host / emulator-farm model: many agents connect
- * to one device host and one ADBMCP_ALLOWED_DEVICES allowlist.
+ * Two protocol eras share one front door:
+ * - Legacy 2025-era clients get today's stateful sessions: every MCP session gets its
+ *   own McpServer + NodeStreamableHTTPServerTransport, while all sessions share one
+ *   ServerContext (config, runner, device manager, stream registry). This is the
+ *   shared-device-host / emulator-farm model: many agents connect to one device host
+ *   and one ADBMCP_ALLOWED_DEVICES allowlist.
+ * - Modern 2026-07-28 clients are served statelessly: createMcpHandler builds one
+ *   McpServer per request (same ServerContext), server/discover is answered and
+ *   results carry resultType, with no protocol-level sessions. Routing follows the
+ *   SDK's own isLegacyRequest classifier so the two legs can never disagree.
+ *
+ * Bearer auth and the DNS-rebinding Host allowlist are enforced at the front door for
+ * BOTH legs (createMcpHandler deliberately checks no Host/Origin itself).
  *
  * Concurrency: AdbRunner spawns one subprocess per call, so overlapping calls from
  * different sessions are safe. StreamRegistry ids increment in a single-threaded event
@@ -17,8 +26,14 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
-import { NodeStreamableHTTPServerTransport } from '@modelcontextprotocol/node';
-import { isInitializeRequest, type McpServer } from '@modelcontextprotocol/server';
+import { NodeStreamableHTTPServerTransport, toNodeHandler, toWebRequest } from '@modelcontextprotocol/node';
+import {
+  createMcpHandler,
+  isInitializeRequest,
+  isJsonContentType,
+  isLegacyRequest,
+  type McpServer,
+} from '@modelcontextprotocol/server';
 
 import type { ServerContext } from './context.js';
 import { createServer as createMcpServer } from './server.js';
@@ -149,6 +164,18 @@ function tokensEqual(provided: string, expected: string): boolean {
   return timingSafeEqual(digest(provided), digest(expected));
 }
 
+/**
+ * Front-door DNS-rebinding guard for BOTH protocol legs: the Host header must match an
+ * allowlist entry exactly (case-insensitive, port included). Mirrors the semantics the
+ * deprecated transport-level option used to enforce; a missing Host header fails.
+ */
+function hostAllowed(req: IncomingMessage, allowedHosts: string[]): boolean {
+  const host = headerValue(req, 'host');
+  if (host === undefined) return false;
+  const presented = host.trim().toLowerCase();
+  return allowedHosts.some((entry) => entry.toLowerCase() === presented);
+}
+
 function isAuthorized(req: IncomingMessage, token: string | null): boolean {
   if (token === null) return true;
   const header = req.headers.authorization;
@@ -244,6 +271,18 @@ export async function startHttpServer(
   let allowedHosts: string[] = [];
   let closePromise: Promise<void> | null = null;
 
+  // Modern (2026-07-28) leg: stateless per-request serving from the same context.
+  // `legacy: 'reject'` because 2025-era traffic is routed to our stateful session
+  // wiring below — one factory, one tool surface, both eras.
+  const modernHandler = createMcpHandler(() => createMcpServer(ctx), {
+    legacy: 'reject',
+    onerror: (error) => process.stderr.write(`adbmcp: HTTP modern handler error: ${error.message}\n`),
+    maxRequestBodySize: MAX_HTTP_BODY_BYTES,
+  });
+  const modernNode = toNodeHandler(modernHandler, {
+    onerror: (error) => process.stderr.write(`adbmcp: HTTP modern adapter error: ${error.message}\n`),
+  });
+
   const httpServer: Server = createServer((req, res) => {
     handleRequest(req, res).catch((error: unknown) => {
       const detail = error instanceof Error ? error.stack ?? error.message : String(error);
@@ -271,11 +310,8 @@ export async function startHttpServer(
       onsessionclosed: (sessionId) => {
         sessions.delete(sessionId);
       },
-      // enableDnsRebindingProtection/allowedHosts are deprecated in SDK v2 but still
-      // enforced; swapping them for hostHeaderValidation middleware ships with the
-      // 2026-07-28 protocol-adoption work order, not this package migration.
-      enableDnsRebindingProtection: true,
-      allowedHosts,
+      // Host validation lives at the front door (hostAllowed) for both eras; these
+      // deprecated transport options were removed when dual-serve landed.
       maxRequestBodySize: MAX_HTTP_BODY_BYTES,
     });
     transport.onclose = () => {
@@ -326,6 +362,24 @@ export async function startHttpServer(
 
     const parsedBody = await readJsonBody(req, res);
     if (parsedBody === undefined) return;
+
+    // Front-door Content-Type check for both legs: the legacy transport would enforce
+    // it, but createMcpHandler behind toNodeHandler has no check of its own.
+    if (!isJsonContentType(headerValue(req, 'content-type'))) {
+      sendJsonRpcError(res, 415, -32000, 'Unsupported Media Type: Content-Type must be application/json');
+      return;
+    }
+
+    // Dual-serve routing: classify with the SDK's own predicate (always hand it the
+    // already-parsed body — the Node stream is drained and cloning a used body throws).
+    const probe = await toWebRequest(req, parsedBody.value);
+    const legacy = await isLegacyRequest(probe, parsedBody.value, {
+      maxRequestBodySize: MAX_HTTP_BODY_BYTES,
+    });
+    if (!legacy) {
+      await modernNode(req, res, parsedBody.value);
+      return;
+    }
 
     if (existing !== undefined) {
       await existing.transport.handleRequest(req, res, parsedBody.value);
@@ -390,6 +444,11 @@ export async function startHttpServer(
       });
       return;
     }
+    if (!hostAllowed(req, allowedHosts)) {
+      req.resume();
+      sendJsonRpcError(res, 403, -32000, 'Forbidden: disallowed Host header');
+      return;
+    }
     switch (req.method) {
       case 'POST':
         await handlePost(req, res);
@@ -433,6 +492,9 @@ export async function startHttpServer(
         const transports = [...sessions.values()].map(({ transport }) => transport.close());
         sessions.clear();
         await Promise.allSettled(transports);
+        // Aborts in-flight modern exchanges (and their per-request servers) so held
+        // connections release and httpServer.close() can resolve.
+        await modernHandler.close().catch(() => undefined);
         // SSE streams were just closed; drop idle keep-alive sockets so close() resolves.
         httpServer.closeIdleConnections?.();
         await serverClosed;

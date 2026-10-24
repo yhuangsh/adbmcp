@@ -8,7 +8,7 @@
  */
 import { parseArgs } from 'node:util';
 
-import { StdioServerTransport } from '@modelcontextprotocol/server/stdio';
+import { serveStdio } from '@modelcontextprotocol/server/stdio';
 
 import type { HttpConfigOverrides } from './http.js';
 import { createContext, createServer, readVersion } from './server.js';
@@ -72,17 +72,21 @@ async function main(): Promise<void> {
     return;
   }
 
-  const server = createServer(ctx);
-  const transport = new StdioServerTransport();
+  // serveStdio owns era selection for the connection: the default `legacy: 'serve'`
+  // keeps 2025-era stdio clients (initialize handshake) unchanged, while a modern
+  // 2026-07-28 opening is served from the same factory. One instance is pinned per
+  // connection; the factory runs when the opening message arrives.
+  const handle = serveStdio(() => createServer(ctx), {
+    onerror: (error) => process.stderr.write(`adbmcp: stdio transport error: ${error.message}\n`),
+  });
   const shutdown = (signal: string): void => {
     process.stderr.write(`adbmcp: received ${signal}, stopping logcat streams and exiting.\n`);
     ctx.streams.closeAll();
-    void server.close().finally(() => process.exit(0));
+    void handle.close().finally(() => process.exit(0));
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
 
-  await server.connect(transport);
   process.stderr.write(
     `adbmcp ${readVersion()} ready (adb: ${ctx.config.adbPath}, allowed devices: ${
       ctx.config.allowedDevices?.join(', ') ?? 'all'

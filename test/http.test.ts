@@ -1,5 +1,6 @@
 import { request as httpRequest } from 'node:http';
 
+import { Client, StreamableHTTPClientTransport } from '@modelcontextprotocol/client';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
@@ -32,9 +33,11 @@ interface RpcOutcome {
 }
 
 const servers: HttpServerHandle[] = [];
+const clients: Client[] = [];
 let nextRequestId = 1;
 
 afterEach(async () => {
+  for (const client of clients.splice(0)) await client.close().catch(() => undefined);
   for (const server of servers.splice(0)) await server.close();
 });
 
@@ -93,13 +96,24 @@ function initializeMessage(): Record<string, unknown> {
 async function postRpc(
   url: string,
   message: Record<string, unknown>,
-  options: { sessionId?: string; token?: string } = {},
+  options: {
+    sessionId?: string;
+    token?: string;
+    protocolVersion?: string;
+    mcpMethod?: string;
+    mcpName?: string;
+  } = {},
 ): Promise<RpcOutcome> {
   const response = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       Accept: 'application/json, text/event-stream',
+      // 2026-07-28 requests must carry the revision and method as headers too — the
+      // modern validation ladder rejects header/body disagreement (-32020).
+      ...(options.protocolVersion !== undefined ? { 'MCP-Protocol-Version': options.protocolVersion } : {}),
+      ...(options.mcpMethod !== undefined ? { 'Mcp-Method': options.mcpMethod } : {}),
+      ...(options.mcpName !== undefined ? { 'Mcp-Name': options.mcpName } : {}),
       ...(options.sessionId !== undefined ? { 'Mcp-Session-Id': options.sessionId } : {}),
       ...(options.token !== undefined ? { Authorization: `Bearer ${options.token}` } : {}),
     },
@@ -373,5 +387,141 @@ describe('HTTP transport security', () => {
       body: 'x'.repeat(MAX_HTTP_BODY_BYTES + 1),
     });
     expect(oversized.status).toBe(413);
+  });
+});
+
+/** 2026-07-28 envelope claim: both _meta keys are required (clientInfo is only SHOULD). */
+const ENVELOPE_META = {
+  'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+  'io.modelcontextprotocol/clientCapabilities': {},
+};
+
+function modernMessage(method: string, params: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    jsonrpc: '2.0',
+    id: nextRequestId++,
+    method,
+    params: { ...params, _meta: ENVELOPE_META },
+  };
+}
+
+/**
+ * Raw modern POST: envelope claim in `_meta` plus the matching MCP-Protocol-Version,
+ * Mcp-Method (and Mcp-Name for tools/call) headers the validation ladder requires.
+ */
+function postModern(
+  url: string,
+  method: string,
+  params: Record<string, unknown> = {},
+  options: { token?: string } = {},
+): Promise<RpcOutcome> {
+  const name = typeof params.name === 'string' ? params.name : undefined;
+  return postRpc(url, modernMessage(method, params), {
+    ...options,
+    protocolVersion: '2026-07-28',
+    mcpMethod: method,
+    ...(name !== undefined ? { mcpName: name } : {}),
+  });
+}
+
+describe('HTTP transport dual-serve (2026-07-28)', () => {
+  it('serves a modern SDK client end-to-end (discover negotiation, tools, calls)', async () => {
+    const harness = makeHarness();
+    const server = await start(harness);
+
+    const transport = new StreamableHTTPClientTransport(new URL(server.url));
+    const client = new Client({ name: 'adbmcp-modern-test', version: '1.0.0' });
+    clients.push(client);
+    await client.connect(transport); // exercises server/discover negotiation
+
+    const { tools } = await client.listTools();
+    expect(tools).toHaveLength(35);
+
+    const result = await client.callTool({ name: 'list_devices', arguments: {} });
+    expect(result.isError).toBeFalsy();
+    const text = (result.content as Array<{ type: string; text?: string }>)
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text ?? '')
+      .join('\n');
+    expect(text).toContain('emulator-5554');
+    expect(harness.runner.commands()).toContain('devices -l');
+
+    await client.close();
+  });
+
+  it('serves modern POSTs statelessly while legacy initialize still mints sessions', async () => {
+    const server = await start();
+
+    const modern = await postModern(server.url, 'tools/list');
+    expect(modern.status).toBe(200);
+    expect(toolsOf(modern)).toHaveLength(35);
+    expect(modern.sessionId).toBeNull(); // no Mcp-Session-Id minted on the modern leg
+
+    const legacy = await initialize(server.url); // dual-serve sanity: legacy leg intact
+    expect(legacy.sessionId).toBeTruthy();
+  });
+
+  it('answers server/discover on the modern leg', async () => {
+    const server = await start();
+
+    const discover = await postModern(server.url, 'server/discover');
+    expect(discover.status).toBe(200);
+    expect(discover.body.error).toBeUndefined();
+    expect(discover.body.result).toBeDefined(); // the SDK owns the result shape
+  });
+
+  it('lifts resultType onto modern tool results', async () => {
+    const harness = makeHarness();
+    const server = await start(harness);
+
+    const called = await postModern(server.url, 'tools/call', { name: 'list_devices', arguments: {} });
+    expect(called.status).toBe(200);
+    expect((called.body.result as { resultType?: string }).resultType).toBe('complete');
+  });
+
+  it('enforces the bearer token on the modern leg too', async () => {
+    const server = await start(makeHarness(), { token: 's3cret' });
+
+    const missing = await postModern(server.url, 'tools/list');
+    expect(missing.status).toBe(401);
+    expect(missing.body.error?.code).toBe(-32001);
+
+    const good = await postModern(server.url, 'tools/list', {}, { token: 's3cret' });
+    expect(good.status).toBe(200);
+    expect(toolsOf(good)).toHaveLength(35);
+  });
+
+  it('enforces the Host allowlist on the modern leg too', async () => {
+    const server = await start();
+
+    const status = await rawPostWithHost(server.url, 'evil.example', JSON.stringify(modernMessage('tools/list')));
+    expect(status).toBe(403);
+  });
+
+  it('lets the modern path own unsupported-revision errors, not the legacy 400', async () => {
+    const server = await start();
+
+    const unserved = await postRpc(
+      server.url,
+      {
+        jsonrpc: '2.0',
+        id: nextRequestId++,
+        method: 'tools/list',
+        params: {
+          _meta: {
+            'io.modelcontextprotocol/protocolVersion': '1999-01-01',
+            'io.modelcontextprotocol/clientCapabilities': {},
+          },
+        },
+      },
+      // Headers agree with the envelope so the ladder reaches the genuine
+      // unsupported-revision answer rather than a header/body mismatch.
+      { protocolVersion: '1999-01-01', mcpMethod: 'tools/list' },
+    );
+    // Must NOT be the legacy leg's "No valid session ID provided" 400: the envelope
+    // claim routes it to the modern path, which owns the unsupported-version answer.
+    expect(unserved.body.error).toBeDefined();
+    expect(unserved.body.error?.message).not.toContain('No valid session ID');
+    expect(`${unserved.body.error?.code} ${unserved.body.error?.message}`).toMatch(/1999-01-01|protocol version/i);
   });
 });

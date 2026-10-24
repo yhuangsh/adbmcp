@@ -353,6 +353,12 @@ HTTP (`/mcp`, stateful sessions, one shared device/stream context, optional bear
 binding guard, DNS-rebinding protection). v0.6.0 adds `launch_package` (resolve a package's launcher
 activity and start it, returning the component) and `get_ui_hierarchy` `to_file` (keep large dumps
 on-device as `{path, bytes}` for `pull_file` instead of returning structurally truncated inline XML).
+v0.6.1 teaches `type_text` non-ASCII (CJK) input: text rides the `ADB_INPUT_B64` broadcast to a
+capable IME (ADB Keyboard by default) when one is the active input method, with typed
+`IME_UNAVAILABLE`/`TEXT_NOT_ASCII` errors otherwise (`ADBMCP_TYPE_TEXT_NON_ASCII` chooses the
+posture). v0.7.0 moves onto the MCP TypeScript SDK v2 packages and serves both protocol revisions:
+legacy clients keep stateful Streamable HTTP sessions while `2026-07-28` clients get stateless
+serving (`server/discover`, `resultType`, per-request `_meta`), same guardrails on both paths.
 Not implemented: `screenrecord`, `bugreport`, iOS, emulator lifecycle management. Windows is
 best-effort (POSIX-first, like most of the ecosystem).
 

@@ -11,4 +11,3 @@ justfile
 .env
 __pycache__/
 *.pyc
-specs/
